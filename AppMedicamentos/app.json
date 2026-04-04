@@ -1,0 +1,87 @@
+{
+  "expo": {
+    "name": "appmedicamentos",
+    "slug": "appmedicamentos",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/Pato.png",
+    "scheme": "appmedicamentos",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.javierestrada.appmedicamentos"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/images/Pato.png",
+        "backgroundImage": "./assets/images/Pato.png",
+        "monochromeImage": "./assets/images/Pato.png"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "package": "com.javierestrada.appmedicamentos",
+      "googleServicesFile": "./google-services.json",
+      "softwareKeyboardLayoutMode": "pan",
+      "permissions": [
+        "RECEIVE_BOOT_COMPLETED",
+        "WAKE_LOCK",
+        "VIBRATE",
+        "POST_NOTIFICATIONS",
+        "USE_FULL_SCREEN_INTENT",
+        "SCHEDULE_EXACT_ALARM",
+        "FOREGROUND_SERVICE_USE_DEVICE_OR_ALARM",
+        "CAMERA",
+        "READ_CALENDAR",
+        "WRITE_CALENDAR",
+        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+      ]
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/Pato.png"
+    },
+    "assetBundlePatterns": [
+      "assets/**/*"
+    ],
+    "plugins": [
+      "./plugins/withAlarmAndroid",
+      "expo-router",
+      "@react-native-google-signin/google-signin",
+      [
+        "expo-notifications",
+        {
+          "sounds": [
+            "./assets/sounds/tono_recordatorio.mp3"
+          ]
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/Pato.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff",
+          "dark": {
+            "backgroundColor": "#000000"
+          }
+        }
+      ],
+      "expo-secure-store",
+      "expo-web-browser",
+      "expo-font"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "a1b5bcce-b4bb-4f4b-8924-976ac2aaaed7"
+      }
+    }
+  }
+}
