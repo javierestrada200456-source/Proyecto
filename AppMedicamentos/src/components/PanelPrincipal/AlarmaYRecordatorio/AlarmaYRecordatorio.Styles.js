@@ -755,8 +755,8 @@ export const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   weekSquareActive: {
-    backgroundColor: 'rgba(37, 99, 235, 0.16)',
-    borderColor: '#2563EB',
+    backgroundColor: 'rgba(102, 126, 234, 0.18)',
+    borderColor: '#667eea',
   },
   weekSquareText: {
     fontSize: 12,
@@ -764,7 +764,8 @@ export const styles = StyleSheet.create({
     fontWeight: '800',
   },
   weekSquareTextActive: {
-    color: '#2563EB',
+    color: '#667eea',
+    fontWeight: '900',
   },
   chip: {
     paddingHorizontal: 14,
@@ -775,8 +776,8 @@ export const styles = StyleSheet.create({
     borderColor: '#e3e3eb',
   },
   chipActive: {
-    backgroundColor: 'rgba(37, 99, 235, 0.14)',
-    borderColor: '#2563EB',
+    backgroundColor: 'rgba(102, 126, 234, 0.15)',
+    borderColor: '#667eea',
   },
   chipText: {
     fontSize: 14,
@@ -784,7 +785,7 @@ export const styles = StyleSheet.create({
     fontWeight: '600',
   },
   chipTextActive: {
-    color: '#2563EB',
+    color: '#667eea',
     fontWeight: '700',
   },
   twoFieldRow: {
@@ -883,8 +884,32 @@ export const styles = StyleSheet.create({
   },
   pickerCard: {
     backgroundColor: '#fff',
-    borderRadius: 22,
-    padding: 16,
+    borderRadius: 24,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  pickerHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  pickerIconBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: 'rgba(102, 126, 234, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerDivider: {
+    height: 1,
+    backgroundColor: '#f0f0f5',
+    marginBottom: 14,
   },
   pickerTitle: {
     fontSize: 16,
@@ -894,30 +919,49 @@ export const styles = StyleSheet.create({
     textAlign: 'center',
   },
   pickerOptionsWrap: {
-    gap: 10,
+    gap: 8,
   },
   pickerOption: {
-    height: 52,
+    height: 54,
     borderRadius: 16,
-    backgroundColor: '#f8f8f8',
-    borderWidth: 1,
-    borderColor: '#e8e8e8',
-    paddingHorizontal: 14,
+    backgroundColor: '#f8f8fa',
+    borderWidth: 1.5,
+    borderColor: '#ebebf0',
+    paddingHorizontal: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   pickerOptionSelected: {
-    backgroundColor: 'rgba(37, 99, 235, 0.12)',
-    borderColor: '#2563EB',
+    backgroundColor: 'rgba(102, 126, 234, 0.1)',
+    borderColor: '#667eea',
+  },
+  pickerOptionDot: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: '#c0c0cc',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerOptionDotSelected: {
+    borderColor: '#667eea',
+  },
+  pickerOptionDotInner: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#667eea',
   },
   pickerOptionText: {
     fontSize: 15,
-    color: '#333',
-    fontWeight: '800',
+    color: '#444',
+    fontWeight: '600',
   },
   pickerOptionTextSelected: {
-    color: '#2563EB',
+    color: '#667eea',
+    fontWeight: '700',
   },
   pickerCloseButton: {
     marginTop: 14,

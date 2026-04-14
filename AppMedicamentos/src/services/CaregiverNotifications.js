@@ -5,16 +5,29 @@ export const notifyCaregivers = async (titleTemplate, bodyTemplate, medData = {}
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { console.log('[notifyCaregivers] sin usuario'); return; }
 
-    // Obtener mis datos (Paciente)
-    const { data: profileRows } = await supabase
-      .from('profiles')
-      .select('name, full_name, username')
-      .eq('id', user.id)
-      .limit(1);
+    // Obtener mis datos (Paciente) — primero de auth metadata (más fiable),
+    // luego de la tabla profiles como respaldo
+    const meta = user.user_metadata || {};
+    let patientName = meta.full_name || meta.username || meta.name || null;
 
-    const patientProfile = profileRows?.[0];
-    const patientName = patientProfile?.name || patientProfile?.full_name || patientProfile?.username || 'Tu paciente';
-    console.log('[notifyCaregivers] paciente:', patientName, '| uid:', user.id);
+    if (!patientName) {
+      const { data: profileRows } = await supabase
+        .from('profiles')
+        .select('name, full_name, username')
+        .eq('id', user.id)
+        .limit(1);
+
+      const patientProfile = profileRows?.[0];
+      // Ignorar valores que sean placeholders genéricos
+      const PLACEHOLDERS = ['nombre del paciente', 'paciente', 'usuario', 'sin nombre', 'user'];
+      const rawName = patientProfile?.name || patientProfile?.full_name || patientProfile?.username || '';
+      patientName = PLACEHOLDERS.includes(rawName.toLowerCase().trim()) ? null : rawName;
+    }
+
+    // Último recurso: parte del email
+    if (!patientName) {
+      patientName = user.email?.split('@')[0] || 'Tu paciente';
+    }
 
     // Obtener IDs de los cuidadores conectados
     const { data: links, error: linksError } = await supabase

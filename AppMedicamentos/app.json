@@ -33,8 +33,6 @@
         "SCHEDULE_EXACT_ALARM",
         "FOREGROUND_SERVICE_USE_DEVICE_OR_ALARM",
         "CAMERA",
-        "READ_CALENDAR",
-        "WRITE_CALENDAR",
         "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
       ]
     },
@@ -47,6 +45,7 @@
     ],
     "plugins": [
       "./plugins/withAlarmAndroid",
+      "./plugins/withRingtoneAndroid",
       "expo-router",
       "@react-native-google-signin/google-signin",
       [

@@ -14,7 +14,27 @@ const ALL_DAYS = [
   { full: 'Sábado',    short: 'Sáb' },
 ];
 
-export default function ReminderCard({ alarm, lastTaken, onDelete }) {
+// Limpia nombre del medicamento para mostrar solo nombre principal en sentence case
+function cleanMedName(raw) {
+  if (!raw || typeof raw !== 'string') return raw || '';
+  // Si ya está en formato limpio (no todo mayúsculas), solo sentence case
+  const isAllCaps = raw === raw.toUpperCase();
+  const hasForm = /TABLETA|CAPSULA|SOLUCION|COMPRIMIDO|SUSPENSION|JARABE/i.test(raw);
+  if (!isAllCaps && !hasForm) {
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  }
+  // Aplicar lógica de limpieza: quitar concentración y forma farmacéutica
+  let texto = raw.replace(/\s+/g, ' ').trim();
+  // Quitar concentración
+  texto = texto.replace(/(\d+(?:[,.]?\d+)?(?:\s*\/\s*\d+(?:[,.]?\d+)?)?)\s*(?:mg|mcg|ml|g(?!\w)|ui|iu|meq|meg|%)/gi, '');
+  // Quitar formas farmacéuticas
+  const formasRe = /\b(TABLETA|CÁPSULA|CAPSULA|COMPRIMIDO|SOLUCIÓN|SOLUCION|SUSPENSIÓN|SUSPENSION|PARCHE|INYECTABLE|INYECCIÓN|INYECCION|JARABE|POLVO|AMPOLLA|AEROSOL|ÓVULO|OVULO|SUPOSITORIO|CREMA|GEL|POMADA|EMULSIÓN|EMULSION|GOTAS|SPRAY|INHALADOR|ELIXIR|RECUBIERTA|BLANDA|DURA|ORAL|PROLONGADA|SUBLINGUAL|MASTICABLE|DISPERSABLE|EFERVESCENTE|RECONSTITUIR)\b/gi;
+  texto = texto.replace(formasRe, '').replace(/\s+/g, ' ').replace(/[/\-.]+$/, '').trim();
+  if (!texto) return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+  return texto.charAt(0).toUpperCase() + texto.slice(1).toLowerCase();
+}
+
+const ReminderCard = ({ alarm, lastTaken, onDelete }) => {
   const { isDark } = useTheme();
   const [timeSince, setTimeSince] = useState('');
 
@@ -47,8 +67,9 @@ export default function ReminderCard({ alarm, lastTaken, onDelete }) {
       : [];
 
   const activeDays = new Set(Array.isArray(alarm.days) ? alarm.days : []);
+  const selectedDays = ALL_DAYS.filter((d) => activeDays.has(d.full));
   const strength = alarm.medStrength
-    ? `${alarm.medStrength} ${(alarm.medStrengthUnit || 'mg').toUpperCase()}`
+    ? `${alarm.medStrength} ${(alarm.medStrengthUnit || 'mg').toLowerCase()}`
     : null;
 
   return (
@@ -71,7 +92,7 @@ export default function ReminderCard({ alarm, lastTaken, onDelete }) {
           </View>
           <View style={s.nameWrap}>
             <Text style={[s.medName, isDark && s.textWhite]} numberOfLines={1}>
-              {alarm.medName || 'Medicamento'}
+              {cleanMedName(alarm.medName) || 'Medicamento'}
             </Text>
             {strength && (
               <Text style={s.strengthBadgeText}>{strength}</Text>
@@ -91,32 +112,35 @@ export default function ReminderCard({ alarm, lastTaken, onDelete }) {
             <Ionicons name="time-outline" size={13} />  Dosis
           </Text>
           <View style={s.dosesGrid}>
-            {times.map((t, i) => (
-              <View key={i} style={[s.doseChip, isDark && s.doseChipDark]}>
-                <Text style={s.doseNumber}>{i + 1}</Text>
-                <Text style={[s.doseTime, isDark && s.textWhite]}>
-                  {String(t.hour).padStart(2, '0')}:{String(t.minute).padStart(2, '0')}
-                </Text>
-              </View>
-            ))}
+            {times.map((t, i) => {
+              const h24 = Number(t.hour);
+              const ampm = h24 < 12 ? 'AM' : 'PM';
+              const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+              return (
+                <View key={i} style={[s.doseChip, isDark && s.doseChipDark]}>
+                  <Text style={s.doseNumber}>{i + 1}</Text>
+                  <Text style={[s.doseTime, isDark && s.textWhite]}>
+                    {String(h12).padStart(2, '0')}:{String(t.minute).padStart(2, '0')}
+                  </Text>
+                  <Text style={s.dosePeriod}>{ampm}</Text>
+                </View>
+              );
+            })}
           </View>
         </View>
 
         {/* DÍAS */}
-        {activeDays.size > 0 && (
+        {selectedDays.length > 0 && (
           <View style={s.section}>
             <Text style={[s.sectionLabel, isDark && s.sectionLabelDark]}>
               <Ionicons name="calendar-outline" size={13} />  Días
             </Text>
             <View style={s.daysRow}>
-              {ALL_DAYS.map((d) => {
-                const active = activeDays.has(d.full);
-                return (
-                  <View key={d.full} style={[s.dayBadge, active && s.dayBadgeActive]}>
-                    <Text style={[s.dayText, active && s.dayTextActive]}>{d.short}</Text>
-                  </View>
-                );
-              })}
+              {selectedDays.map((d) => (
+                <View key={d.full} style={[s.dayBadge, s.dayBadgeActive]}>
+                  <Text style={[s.dayText, s.dayTextActive]}>{d.short}</Text>
+                </View>
+              ))}
             </View>
           </View>
         )}
@@ -255,6 +279,12 @@ const s = StyleSheet.create({
     color: '#334155',
     letterSpacing: 0.5,
   },
+  dosePeriod: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#667eea',
+    letterSpacing: 0.5,
+  },
   daysRow: {
     flexDirection: 'row',
     gap: 5,
@@ -302,3 +332,7 @@ const s = StyleSheet.create({
     color: '#4ade80',
   },
 });
+
+
+export default React.memo(ReminderCard);
+

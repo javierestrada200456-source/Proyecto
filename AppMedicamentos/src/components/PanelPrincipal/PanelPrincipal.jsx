@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,7 +9,9 @@ import {
   Image,
   Alert,
   Modal,
+  AppState,
 } from 'react-native';
+import * as Battery from 'expo-battery';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -24,7 +26,8 @@ import { useTheme } from '../../context/ThemeContext';
 import { registerAndSavePushToken } from './AlarmaYRecordatorio/NotificacionesORecordatorios';
 
 const { width } = Dimensions.get('window');
-const ALARMS_KEY = '@app_medicamentos_alarms';
+const ALARMS_KEY = '@alarms_v1';
+const DOSE_HISTORY_KEY = '@dose_history';
 
 export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
   const router = useRouter();
@@ -42,13 +45,37 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
 
   const [pendingReminders, setPendingReminders] = useState([]);
   const [reminderModalVisible, setReminderModalVisible] = useState(false);
+  const [historyModalVisible, setHistoryModalVisible] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState([]);
+  const [historyDetailMed, setHistoryDetailMed] = useState(null);
+  const [batterySaverOn, setBatterySaverOn] = useState(false);
+  const appStateRef = useRef(AppState.currentState);
 
   // Cargar imagen de perfil al montar el componente
   useEffect(() => {
     loadProfileImage();
     loadWelcomeMessage();
-    registerAndSavePushToken(); // Guardar el push token del dispositivo en Supabase
+    registerAndSavePushToken();
+    checkBatterySaver();
+
+    // Re-chequear cuando la app vuelve al primer plano
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (appStateRef.current.match(/inactive|background/) && nextState === 'active') {
+        checkBatterySaver();
+      }
+      appStateRef.current = nextState;
+    });
+    return () => sub.remove();
   }, []);
+
+  const checkBatterySaver = async () => {
+    try {
+      const state = await Battery.getPowerStateAsync();
+      setBatterySaverOn(state.lowPowerMode === true);
+    } catch (_) {
+      setBatterySaverOn(false);
+    }
+  };
 
   const loadWelcomeMessage = async () => {
     try {
@@ -259,9 +286,17 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
           daysOfUse = fullDaysPassed + 1;
       }
 
+      // Leer historial de dosis completadas
+      let historyList = [];
+      try {
+        const histStored = await AsyncStorage.getItem(DOSE_HISTORY_KEY);
+        historyList = histStored ? JSON.parse(histStored) : [];
+      } catch (_e) { /* noop */ }
+      setHistoryEntries(historyList);
+
       setStats({
         remindersToday: remindersRes.count ?? 0,
-        completed: completedRes.count ?? 0,
+        completed: historyList.length,
         activeMeds: localActiveAlarms || medsRes.count || 0,
         daysOfUse: daysOfUse,
       });
@@ -289,36 +324,36 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
       id: 1,
       title: 'Crea tus Recordatorios',
       icon: 'alarm',
-      color: '#667eea',
-      bgColor: isDark ? 'transparent' : '#e8ecff',
-      borderColor: isDark ? '#667eea' : '#667eea',
+      color: '#6366F1',
+      bgColor: isDark ? '#1e1b4b' : '#eeeeff',
+      borderColor: '#6366F1',
       route: '/alarma',
     },
     {
       id: 2,
       title: 'Conectar Recordatorios',
       icon: 'link',
-      color: '#764ba2',
-      bgColor: isDark ? 'transparent' : '#f3e9f8',
-      borderColor: isDark ? '#764ba2' : '#764ba2',
+      color: '#8B5CF6',
+      bgColor: isDark ? '#2e1b4e' : '#f0ebff',
+      borderColor: '#8B5CF6',
       route: '/conectar',
     },
     {
       id: 3,
       title: 'Buscar Medicamentos',
       icon: 'search',
-      color: '#f093fb',
-      bgColor: isDark ? 'transparent' : '#fde8ff',
-      borderColor: isDark ? '#f093fb' : '#f093fb',
+      color: '#06B6D4',
+      bgColor: isDark ? '#0c2a33' : '#e0f9fd',
+      borderColor: '#06B6D4',
       route: '/buscar',
     },
     {
       id: 4,
       title: 'Mi Perfil',
       icon: 'person',
-      color: '#4facfe',
-      bgColor: isDark ? 'transparent' : '#e8f5ff',
-      borderColor: isDark ? '#4facfe' : '#4facfe',
+      color: '#3B82F6',
+      bgColor: isDark ? '#0f1e3d' : '#e8f1ff',
+      borderColor: '#3B82F6',
       route: '/perfil',
     },
   ];
@@ -343,6 +378,121 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
       style={styles.container}
     >
       <SafeAreaView style={styles.safeArea}>
+
+        {/* Overlay ahorro de batería — bloquea pantalla hasta desactivar */}
+        {batterySaverOn && (
+          <View style={{
+            position: 'absolute',
+            top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.72)',
+            zIndex: 999,
+            justifyContent: 'center',
+            alignItems: 'center',
+            padding: 28,
+          }}>
+            <Animatable.View
+              animation="zoomIn"
+              duration={450}
+              style={{
+                width: '100%',
+                borderRadius: 24,
+                overflow: 'hidden',
+                elevation: 20,
+                shadowColor: '#F59E0B',
+                shadowOffset: { width: 0, height: 6 },
+                shadowOpacity: 0.5,
+                shadowRadius: 16,
+              }}
+            >
+              <LinearGradient
+                colors={['#1c1107', '#2d1a0a', '#3d2108']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={{
+                  padding: 28,
+                  borderRadius: 24,
+                  borderWidth: 1.5,
+                  borderColor: 'rgba(245,158,11,0.5)',
+                  alignItems: 'center',
+                }}
+              >
+                {/* Icono principal */}
+                <Animatable.View
+                  animation="pulse"
+                  iterationCount="infinite"
+                  duration={2000}
+                  style={{
+                    width: 72,
+                    height: 72,
+                    borderRadius: 36,
+                    backgroundColor: 'rgba(245,158,11,0.15)',
+                    borderWidth: 2,
+                    borderColor: 'rgba(245,158,11,0.4)',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    marginBottom: 20,
+                  }}
+                >
+                  <Ionicons name="battery-dead" size={36} color="#F59E0B" />
+                </Animatable.View>
+
+                {/* Título */}
+                <Text style={{
+                  color: '#FCD34D',
+                  fontWeight: '800',
+                  fontSize: 18,
+                  textAlign: 'center',
+                  letterSpacing: 0.3,
+                  marginBottom: 12,
+                }}>
+                  Ahorro de energía activo
+                </Text>
+
+                {/* Línea divisora */}
+                <View style={{ width: 48, height: 2, backgroundColor: '#F59E0B', borderRadius: 2, marginBottom: 16, opacity: 0.6 }} />
+
+                {/* Mensaje */}
+                <Text style={{
+                  color: '#FDE68A',
+                  fontSize: 14,
+                  lineHeight: 22,
+                  textAlign: 'center',
+                  fontWeight: '500',
+                  marginBottom: 8,
+                }}>
+                  Tu dispositivo está en modo ahorro de batería. Esto puede retrasar o bloquear todas las alarmas y notificaciones de medicamentos.
+                </Text>
+                <Text style={{
+                  color: 'rgba(253,230,138,0.65)',
+                  fontSize: 13,
+                  lineHeight: 20,
+                  textAlign: 'center',
+                  marginBottom: 24,
+                }}>
+                  Este mensaje desaparecerá automáticamente cuando desactives el ahorro de energía.
+                </Text>
+
+                {/* Indicador */}
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  backgroundColor: 'rgba(245,158,11,0.1)',
+                  borderRadius: 12,
+                  paddingHorizontal: 14,
+                  paddingVertical: 8,
+                  borderWidth: 1,
+                  borderColor: 'rgba(245,158,11,0.25)',
+                }}>
+                  <Ionicons name="settings-outline" size={16} color="#F59E0B" style={{ marginRight: 8 }} />
+                  <Text style={{ color: '#F59E0B', fontSize: 13, fontWeight: '700' }}>
+                    Ajustes → Batería → Desactivar ahorro
+                  </Text>
+                </View>
+              </LinearGradient>
+            </Animatable.View>
+          </View>
+        )}
+
         <ScrollView
           contentContainerStyle={[
             styles.scrollContent,
@@ -479,13 +629,13 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
               <View style={styles.verticalDivider} />
 
               {/* Stat 3: Recordatorios completados */}
-              <View style={styles.statItem}>
+              <TouchableOpacity style={styles.statItem} onPress={() => setHistoryModalVisible(true)} activeOpacity={0.7}>
                 <View style={[styles.statIconCircle, { backgroundColor: '#f093fb' }]}>
                   <Ionicons name="checkmark-circle" size={22} color="#fff" />
                 </View>
                 <Text style={[styles.statNumber, { color: '#f093fb' }]}>{stats.completed}</Text>
                 <Text style={[styles.statLabel, isDark && { color: theme.textSecondary }]}>Recordatorios Completados</Text>
-              </View>
+              </TouchableOpacity>
             </LinearGradient>
           </Animatable.View>
 
@@ -498,7 +648,16 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
                   animation="slideInUp"
                   duration={800}
                   delay={300 + index * 100}
-                  style={{ width: '48%' }}
+                  style={{
+                    width: '48%',
+                    borderRadius: 22,
+                    backgroundColor: item.bgColor,
+                    elevation: 12,
+                    shadowColor: '#000',
+                    shadowOffset: { width: 0, height: 8 },
+                    shadowOpacity: 0.25,
+                    shadowRadius: 14,
+                  }}
                 >
                   <TouchableOpacity
                     activeOpacity={0.7}
@@ -597,6 +756,161 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
                 </Animatable.View>
             </View>
           </Modal>
+
+          {/* Modal Historial de Dosis Completadas */}
+          <Modal
+            visible={historyModalVisible}
+            transparent
+            animationType="fade"
+            onRequestClose={() => { setHistoryModalVisible(false); setHistoryDetailMed(null); }}
+          >
+            <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 20 }}>
+              <Animatable.View
+                animation="zoomIn"
+                duration={400}
+                style={{ backgroundColor: isDark ? theme.card : '#fff', borderRadius: 20, padding: 20, maxHeight: '85%', elevation: 10 }}
+              >
+                {/* Header */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15, alignItems: 'center' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                    {historyDetailMed && (
+                      <TouchableOpacity onPress={() => setHistoryDetailMed(null)} style={{ marginRight: 10 }}>
+                        <Ionicons name="arrow-back" size={24} color={isDark ? theme.text : '#333'} />
+                      </TouchableOpacity>
+                    )}
+                    <Text style={{ fontSize: 18, fontWeight: 'bold', color: isDark ? theme.text : '#333', flex: 1 }} numberOfLines={1}>
+                      {historyDetailMed ? `💊 ${historyDetailMed}` : '✅ Historial de dosis'}
+                    </Text>
+                  </View>
+                  <TouchableOpacity onPress={() => { setHistoryModalVisible(false); setHistoryDetailMed(null); }}>
+                    <Ionicons name="close-circle" size={32} color={isDark ? theme.textSecondary : '#ccc'} />
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  {historyEntries.length === 0 ? (
+                    <Text style={{ textAlign: 'center', color: isDark ? theme.textSecondary : '#666', marginVertical: 30, fontSize: 15 }}>
+                      Aún no has aceptado ninguna dosis.
+                    </Text>
+                  ) : historyDetailMed ? (
+                    /* Vista detalle: entradas de UN medicamento, más recientes arriba */
+                    (() => {
+                      const pad = (n) => String(n).padStart(2, '0');
+                      const fmtDate = (d) => `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+                      const fmtTime = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+                      const entries = historyEntries
+                        .filter(e => e.medName === historyDetailMed)
+                        .sort((a, b) => new Date(b.takenAt) - new Date(a.takenAt));
+                      return entries.map((entry) => {
+                        const takenDate = new Date(entry.takenAt);
+                        const scheduledDate = entry.scheduledTime ? new Date(entry.scheduledTime) : null;
+                        return (
+                          <View
+                            key={entry.id}
+                            style={{
+                              padding: 14,
+                              marginBottom: 10,
+                              borderRadius: 14,
+                              backgroundColor: isDark ? 'rgba(240,147,251,0.1)' : '#fdf4ff',
+                              borderLeftWidth: 4,
+                              borderLeftColor: '#f093fb',
+                            }}
+                          >
+                            <Text style={{ fontSize: 14, color: '#f093fb', fontWeight: '700', marginBottom: 4 }}>
+                              {entry.doseLabel}
+                            </Text>
+                            {scheduledDate && (
+                              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 3 }}>
+                                <Ionicons name="alarm-outline" size={14} color={isDark ? '#aaa' : '#888'} />
+                                <Text style={{ fontSize: 12, color: isDark ? '#aaa' : '#666', marginLeft: 5 }}>
+                                  Programada: {fmtDate(scheduledDate)} {fmtTime(scheduledDate)}
+                                </Text>
+                              </View>
+                            )}
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <Ionicons name="checkmark-circle-outline" size={14} color="#4ade80" />
+                              <Text style={{ fontSize: 12, color: '#4ade80', marginLeft: 5, fontWeight: '600' }}>
+                                Tomado el {fmtDate(takenDate)} a las {fmtTime(takenDate)}
+                              </Text>
+                            </View>
+                          </View>
+                        );
+                      });
+                    })()
+                  ) : (
+                    /* Vista lista: un card por medicamento */
+                    (() => {
+                      // Agrupar por medName y ordenar por toma más reciente
+                      const grouped = {};
+                      historyEntries.forEach(e => {
+                        if (!grouped[e.medName]) grouped[e.medName] = [];
+                        grouped[e.medName].push(e);
+                      });
+                      // Ordenar medicamentos por la toma más reciente
+                      const medsSorted = Object.entries(grouped).sort((a, b) => {
+                        const latestA = Math.max(...a[1].map(e => new Date(e.takenAt).getTime()));
+                        const latestB = Math.max(...b[1].map(e => new Date(e.takenAt).getTime()));
+                        return latestB - latestA;
+                      });
+                      return medsSorted.map(([medName, entries]) => {
+                        const latest = entries.reduce((a, b) => new Date(a.takenAt) > new Date(b.takenAt) ? a : b);
+                        const d = new Date(latest.takenAt);
+                        const pad = (n) => String(n).padStart(2, '0');
+                        const latestStr = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+                        return (
+                          <View
+                            key={medName}
+                            style={{
+                              padding: 14,
+                              marginBottom: 12,
+                              borderRadius: 16,
+                              backgroundColor: isDark ? 'rgba(240,147,251,0.08)' : '#fdf4ff',
+                              borderWidth: 1,
+                              borderColor: isDark ? 'rgba(240,147,251,0.25)' : '#f0c4fa',
+                            }}
+                          >
+                            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                              <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: '#f093fb', alignItems: 'center', justifyContent: 'center', marginRight: 10 }}>
+                                <Ionicons name="medical" size={18} color="#fff" />
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <Text style={{ fontSize: 16, fontWeight: '800', color: isDark ? '#fff' : '#333' }}>{medName}</Text>
+                                <Text style={{ fontSize: 11, color: isDark ? '#aaa' : '#888', marginTop: 1 }}>
+                                  {entries.length} dosis registrada{entries.length !== 1 ? 's' : ''}
+                                </Text>
+                              </View>
+                            </View>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+                              <Ionicons name="time-outline" size={13} color={isDark ? '#aaa' : '#888'} />
+                              <Text style={{ fontSize: 12, color: isDark ? '#aaa' : '#888', marginLeft: 4 }}>
+                                Última toma: {latestStr}
+                              </Text>
+                            </View>
+                            <TouchableOpacity
+                              onPress={() => setHistoryDetailMed(medName)}
+                              style={{
+                                backgroundColor: '#f093fb',
+                                borderRadius: 10,
+                                paddingVertical: 8,
+                                alignItems: 'center',
+                                flexDirection: 'row',
+                                justifyContent: 'center',
+                                gap: 6,
+                              }}
+                            >
+                              <Ionicons name="list" size={16} color="#fff" />
+                              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Ver historial de este medicamento</Text>
+                            </TouchableOpacity>
+                          </View>
+                        );
+                      });
+                    })()
+                  )}
+                </ScrollView>
+              </Animatable.View>
+            </View>
+          </Modal>
+
         </ScrollView>
       </SafeAreaView>
     </LinearGradient>

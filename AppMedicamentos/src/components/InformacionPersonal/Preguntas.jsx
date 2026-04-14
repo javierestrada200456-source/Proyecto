@@ -388,6 +388,36 @@ const Preguntas = ({ onComplete }) => {
       style={styles.container}
     >
       <SafeAreaView style={styles.safeArea}>
+        {/* Header fijo — fuera del ScrollView */}
+        <Animatable.View animation="fadeInDown" duration={800} style={styles.header}>
+          <View style={styles.headerContent}>
+            <Text style={styles.headerTitle}>Completa tu Perfil</Text>
+            <Text style={styles.headerSubtitle}>
+              Proporciona información personal para mejorar tu experiencia
+            </Text>
+          </View>
+        </Animatable.View>
+
+        {/* Barra de progreso fija — fuera del ScrollView */}
+        <Animatable.View animation="fadeInUp" duration={800} style={styles.progressContainer}>
+          <View style={styles.progressBar}>
+            <LinearGradient
+              colors={['#4ECDC4', '#44A08D']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={[
+                styles.progressFill,
+                {
+                  width: `${((completedSteps.size) / 5) * 100}%`,
+                },
+              ]}
+            />
+          </View>
+          <Text style={styles.progressText}>
+            Paso {completedSteps.size} de 5
+          </Text>
+        </Animatable.View>
+
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.keyboardContainer}
@@ -402,36 +432,6 @@ const Preguntas = ({ onComplete }) => {
             ]}
             keyboardShouldPersistTaps="handled"
           >
-            {/* Header */}
-            <Animatable.View animation="fadeInDown" duration={800} style={styles.header}>
-              <View style={styles.headerContent}>
-                <Text style={styles.headerTitle}>Completa tu Perfil</Text>
-                <Text style={styles.headerSubtitle}>
-                  Proporciona información personal para mejorar tu experiencia
-                </Text>
-              </View>
-            </Animatable.View>
-
-            {/* Progress Indicator */}
-            <Animatable.View animation="fadeInUp" duration={800} style={styles.progressContainer}>
-              <View style={styles.progressBar}>
-                <LinearGradient
-                  colors={['#4ECDC4', '#44A08D']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={[
-                    styles.progressFill,
-                    {
-                      width: `${((completedSteps.size) / 5) * 100}%`,
-                    },
-                  ]}
-                />
-              </View>
-              <Text style={styles.progressText}>
-                Paso {completedSteps.size} de 5
-              </Text>
-            </Animatable.View>
-
             {/* Form Container */}
             <Animatable.View
               ref={formRef}
@@ -652,9 +652,13 @@ const Preguntas = ({ onComplete }) => {
                       selectTextOnFocus={true}
                       onChangeText={(text) => {
                         setFormData({ ...formData, peso: text });
-                        if (text) {
+                        if (text && parseFloat(text) >= 10) {
                           setErrors({ ...errors, peso: '' });
                           setCompletedSteps(new Set([...completedSteps, 3]));
+                        } else {
+                          const next = new Set([...completedSteps]);
+                          next.delete(3);
+                          setCompletedSteps(next);
                         }
                       }}
                       onFocus={() => setFocusedField('peso')}

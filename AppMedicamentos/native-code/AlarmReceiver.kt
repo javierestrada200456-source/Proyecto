@@ -7,6 +7,8 @@ import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -32,13 +34,21 @@ class AlarmReceiver : BroadcastReceiver() {
     wakeLock.acquire(3000) // Mantener despierto 3 seg para asegurar que la activity prenda
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      // Usar USAGE_ALARM para que el sonido no sea silenciado por "Vibrar" ni DnD en muchos dispositivos
+      val soundUri = Uri.parse("android.resource://${context.packageName}/raw/tono_recordatorio")
+      val audioAttrs = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_ALARM)
+        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+        .build()
       val channel = NotificationChannel(
         channelId,
         "Alarmas",
         NotificationManager.IMPORTANCE_HIGH
       ).apply {
         lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
-        // setSound(null, null) // Usar sonido por defecto de notificación en general
+        setSound(soundUri, audioAttrs)
+        enableVibration(true)
+        vibrationPattern = longArrayOf(0, 300, 200, 300)
       }
       notificationManager.createNotificationChannel(channel)
     }

@@ -592,6 +592,72 @@ const computeNextOccurrenceMs = (hh, mm, days) => {
   return now.getTime() + 24 * 60 * 60 * 1000;
 };
 
+/**
+ * Equivalencia de nombres de días en español al número de weekday de Expo/iOS.
+ * Expo CALENDAR trigger: 1=Domingo, 2=Lunes, …, 7=Sábado (igual que NSCalendar).
+ */
+const WEEKDAY_MAP_ES = {
+  'Domingo': 1, 'Lunes': 2, 'Martes': 3, 'Miércoles': 4,
+  'Jueves': 5, 'Viernes': 6, 'Sábado': 7,
+};
+
+/**
+ * Programa notificaciones RECURRENTES para una dosis.
+ *  - Sin días específicos → dispara cada día a la misma hora (CALENDAR + repeats).
+ *  - Con días específicos → una notificación semanal por cada día (CALENDAR + weekday + repeats).
+ * Devuelve array de { notifId, day } para poder rastrearlas.
+ */
+const scheduleDoseNotifications = async (content, hh, mm, days) => {
+  const allDays = !days || days.length === 0;
+
+  if (allDays) {
+    // DAILY funciona en Android e iOS — repite cada día a la misma hora
+    const notifId = await Notifications.scheduleNotificationAsync({
+      content,
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DAILY,
+        hour: hh,
+        minute: mm,
+        channelId: 'medication-reminders',
+      },
+    });
+    return [{ notifId, day: 'everyday' }];
+  }
+
+  const results = [];
+  for (const day of days) {
+    const weekday = WEEKDAY_MAP_ES[day] ?? null;
+    if (!weekday) continue;
+    // WEEKLY funciona en Android e iOS — repite cada semana en ese día
+    const notifId = await Notifications.scheduleNotificationAsync({
+      content,
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
+        weekday,
+        hour: hh,
+        minute: mm,
+        channelId: 'medication-reminders',
+      },
+    });
+    results.push({ notifId, day });
+  }
+
+  // Si ningún día pudo mapearse, cae a diario
+  if (results.length === 0) {
+    const notifId = await Notifications.scheduleNotificationAsync({
+      content,
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DAILY,
+        hour: hh,
+        minute: mm,
+        channelId: 'medication-reminders',
+      },
+    });
+    results.push({ notifId, day: 'everyday' });
+  }
+  return results;
+};
+
 export default function ConectarRecordatorios() {
   const router = useRouter();
   const { theme, isDark } = useTheme();
@@ -723,7 +789,10 @@ export default function ConectarRecordatorios() {
               };
             });
 
-            const displayName = profile.name || profile.full_name || profile.username || 'Paciente';
+            const rawDisplayName = profile.name || profile.full_name || profile.username || '';
+            const displayName = (rawDisplayName && !PLACEHOLDERS.includes(rawDisplayName.toLowerCase().trim()))
+              ? rawDisplayName
+              : (profile.email?.split('@')[0] || 'Paciente');
             const account = { id: profile.id, name: displayName, reminders };
 
             // Cancelar todo y reprogramar
@@ -743,44 +812,40 @@ export default function ConectarRecordatorios() {
                 const mm = parseInt(parts[1], 10);
                 if (isNaN(hh) || isNaN(mm)) continue;
 
-                const nextFireMs = computeNextOccurrenceMs(hh, mm, reminder.days);
-                const fireDate = new Date(nextFireMs);
                 const ORDINALS = ['Primera', 'Segunda', 'Tercera'];
                 const doseOrdinal = ORDINALS[doseIndex] || `${doseIndex + 1}.ª`;
 
-                const notifId = await Notifications.scheduleNotificationAsync({
-                  content: {
-                    title: `Hola, ${caregiverName}. Es hora de la siguiente dosis para ${account.name}.`,
-                    body: `${doseOrdinal} dosis: ${reminder.medName}`,
-                    sound: 'tono_recordatorio.mp3',
-                    priority: Notifications.AndroidNotificationPriority.HIGH,
-                    data: {
-                      type: 'external_reminder',
-                      ownerName: account.name,
-                      medName: reminder.medName,
-                      doseIndex,
-                      time: timeStr,
-                      accountId: account.id,
-                      reminderId: reminder.id,
-                      days: JSON.stringify(reminder.days || []),
-                    },
+                const notifContent = {
+                  title: `⏰ Es hora de la dosis de ${account.name}`,
+              body: `👋 Hola, ${caregiverName}.\n${doseOrdinal} dosis: ${reminder.medName}`,
+                  sound: 'default',
+                  priority: Notifications.AndroidNotificationPriority.HIGH,
+                  data: {
+                    type: 'external_reminder',
+                    ownerName: account.name,
+                    medName: reminder.medName,
+                    doseIndex,
+                    time: timeStr,
+                    accountId: account.id,
+                    reminderId: reminder.id,
+                    days: JSON.stringify(reminder.days || []),
                   },
-                  trigger: {
-                    type: Notifications.SchedulableTriggerInputTypes.DATE,
-                    date: fireDate,
-                    channelId: 'medication-reminders',
-                  },
-                });
+                };
 
-                newSynced.push({
-                  accountId: account.id,
-                  reminderId: reminder.id,
-                  doseIndex,
-                  time: timeStr,
-                  medName: reminder.medName,
-                  notificationId: notifId,
-                  nextFireMs,
-                });
+                // Programar notificación RECURRENTE
+                const scheduled = await scheduleDoseNotifications(notifContent, hh, mm, reminder.days);
+
+                for (const { notifId, day } of scheduled) {
+                  newSynced.push({
+                    accountId: account.id,
+                    reminderId: reminder.id,
+                    doseIndex,
+                    time: timeStr,
+                    medName: reminder.medName,
+                    day,
+                    notificationId: notifId,
+                  });
+                }
               }
             }
 
@@ -818,13 +883,18 @@ export default function ConectarRecordatorios() {
 
       // Canal Android (reusar legacy ya existente en la app)
       if (Platform.OS === 'android') {
+        let _sp = {};
+        try { const _r = await AsyncStorage.getItem('@sound_prefs'); if (_r) _sp = JSON.parse(_r); } catch (_) {}
+        const _sound = (!_sp.selectedNotifTone || _sp.selectedNotifTone === 'melody_med') ? 'tono_recordatorio' : _sp.selectedNotifTone;
+        const _vib = _sp.vibrationEnabled !== false ? [250, 250, 250, 250] : null;
+
         await Notifications.setNotificationChannelAsync('medication-reminders', {
           name: 'Recordatorios de Medicamentos',
           importance: Notifications.AndroidImportance.MAX,
-          vibrationPattern: [0, 250, 250, 250],
+          ...(_vib ? { vibrationPattern: _vib } : {}),
           lightColor: '#FF231F7C',
           lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
-          sound: 'tono_recordatorio.mp3',
+          sound: _sound,
         });
       }
 
@@ -908,25 +978,28 @@ export default function ConectarRecordatorios() {
     };
   };
 
+  const PLACEHOLDERS = ['nombre del paciente', 'paciente', 'usuario', 'sin nombre', 'user'];
+  const isPlaceholder = (val) => !val || PLACEHOLDERS.includes(val.toLowerCase().trim());
+
   const mapProfileRow = (row, reminders = []) => {
     let displayName = 'Sin nombre';
-    // Mapeo exhaustivo de posibles campos de nombre
-    if (row?.first_name) {
+    // Mapeo exhaustivo de posibles campos de nombre, ignorando placeholders genéricos
+    if (row?.first_name && !isPlaceholder(row.first_name)) {
       displayName = `${row.first_name} ${row.last_name || ''}`.trim();
-    } else if (row?.full_name) {
+    } else if (row?.full_name && !isPlaceholder(row.full_name)) {
       displayName = row.full_name;
-    } else if (row?.display_name) {
+    } else if (row?.display_name && !isPlaceholder(row.display_name)) {
       displayName = row.display_name;
-    } else if (row?.name) {
+    } else if (row?.name && !isPlaceholder(row.name)) {
       displayName = row.name;
-    } else if (row?.username) {
+    } else if (row?.username && !isPlaceholder(row.username)) {
       displayName = row.username;
     } else if (row?.email) {
       displayName = row.email.split('@')[0];
     }
     
     // Si viene "Usuario" genérico y tenemos email o username, preferir esos
-    if (displayName === 'Usuario' && row?.username) displayName = row.username;
+    if (isPlaceholder(displayName) && row?.username && !isPlaceholder(row.username)) displayName = row.username;
 
     return {
       id: row.id,
@@ -1069,6 +1142,13 @@ export default function ConectarRecordatorios() {
       }
 
       setLinkedAccounts(accounts);
+
+      // ── Auto-resync silencioso al abrir la app ──────────────────────────────
+      // Garantiza que las notificaciones estén programadas aunque el teléfono
+      // se haya reiniciado o la app se haya reinstalado.
+      if (accounts.length > 0) {
+        backgroundSyncAllAccounts(accounts).catch(() => {});
+      }
     } catch (e) {
       setLinkedAccounts([]);
     }
@@ -1102,6 +1182,7 @@ export default function ConectarRecordatorios() {
 
   const [syncInProgress, setSyncInProgress] = useState(false);
   const isSyncingRef = React.useRef(false); // Ref para guard síncrono
+  const isBackgroundSyncRunning = React.useRef(false); // Guard para evitar doble backgroundSync
 
   const handleSyncAllReminders = async (user) => {
     if (isSyncingRef.current) return; // Guard síncrono (no depende del ciclo de render)
@@ -1141,6 +1222,91 @@ export default function ConectarRecordatorios() {
       }]
     );
   };
+
+  // ── Sincronización silenciosa de todos los pacientes ────────────────────────
+  const backgroundSyncAllAccounts = async (accounts) => {
+    if (isBackgroundSyncRunning.current) return;
+    isBackgroundSyncRunning.current = true;
+    try {
+      const ready = await ensureExternalReminderNotificationReady();
+      if (!ready) return;
+
+      const { data: { user } } = await authService.getCurrentUser();
+      const caregiverName = user?.user_metadata?.full_name || user?.user_metadata?.name || 'Cuidador';
+
+      // Cancelar todo una sola vez antes de reprogramar todos los pacientes
+      try {
+        await Notifications.cancelAllScheduledNotificationsAsync();
+      } catch (_e) { /* noop */ }
+
+      const newSynced = [];
+
+      for (const account of accounts) {
+        const activeReminders = (account.reminders || []).filter(r => !!r.active);
+        if (activeReminders.length === 0) continue;
+
+        for (const reminder of activeReminders) {
+          const times = reminder.doseTimes?.length > 0 ? reminder.doseTimes : [reminder.time];
+          for (let doseIndex = 0; doseIndex < times.length; doseIndex++) {
+            const timeStr = times[doseIndex];
+            const parsed = parseHHMM(timeStr);
+            if (!parsed) continue;
+
+            const DOSE_ORDINALS = ['Primera', 'Segunda', 'Tercera'];
+            const doseOrdinal = DOSE_ORDINALS[doseIndex] || `${doseIndex + 1}.ª`;
+
+            const _dose = reminder.dose || '';
+            const _unit = _dose ? (reminder.medStrengthUnit || '') : '';
+            const _str = [_dose, _unit].filter(Boolean).join(' ');
+            const _qty = reminder.quantityToTake || reminder.quantity_to_take || '';
+            const _line1 = `${doseOrdinal} dosis: ${reminder.medName}${_str ? ` — ${_str}` : ''}`;
+            const _line2 = _qty ? `Cantidad: ${_qty}${reminder.medType ? ` ${reminder.medType}` : ''}` : '';
+
+            const notifContent = {
+              title: `⏰ Es hora de la dosis de ${account.name}`,
+              body: `👋 Hola, ${caregiverName}.\n${_line1}${_line2 ? `\n${_line2}` : ''}`,
+              sound: 'default',
+              priority: Notifications.AndroidNotificationPriority.HIGH,
+              data: {
+                type: 'external_reminder',
+                ownerName: account.name,
+                medName: reminder.medName,
+                doseIndex,
+                time: parsed.hhmm,
+                accountId: account.id,
+                reminderId: reminder.id,
+                days: JSON.stringify(reminder.days || []),
+              },
+            };
+
+            const scheduled = await scheduleDoseNotifications(notifContent, parsed.hh, parsed.mm, reminder.days);
+            for (const { notifId, day } of scheduled) {
+              newSynced.push({
+                accountId: account.id,
+                reminderId: reminder.id,
+                doseIndex,
+                time: timeStr,
+                medName: reminder.medName,
+                day,
+                notificationId: notifId,
+              });
+            }
+          }
+        }
+      }
+
+      await saveSyncedReminders(newSynced);
+      const userMap = {};
+      newSynced.forEach(item => { if (item.accountId) userMap[item.accountId] = true; });
+      setSyncedUsers(prev => ({ ...userMap, ...prev }));
+      console.log('[backgroundSync] Sincronización automática completada:', newSynced.length, 'notificaciones programadas');
+    } catch (e) {
+      console.warn('[backgroundSync] Error:', e);
+    } finally {
+      isBackgroundSyncRunning.current = false;
+    }
+  };
+  // ────────────────────────────────────────────────────────────────────────────
 
   const autoSyncAllReminders = async (account, reminders) => {
     try {
@@ -1184,51 +1350,53 @@ export default function ConectarRecordatorios() {
           const doseOrdinal = DOSE_ORDINALS[doseIndex] || `${doseIndex + 1}.ª`;
           const medTypeStr = reminder.medType ? ` (${reminder.medType})` : '';
 
-          // Calcular PRÓXIMA ocurrencia respetando días (nunca dispara de inmediato)
-          const nextFireMs = computeNextOccurrenceMs(parsed.hh, parsed.mm, reminder.days);
-          const secondsUntilNext = Math.max(60, Math.ceil((nextFireMs - Date.now()) / 1000));
-          const fireAt = new Date(nextFireMs).toLocaleString();
-          console.log(`[autoSync] Programando: ${reminder.medName} dosis${doseIndex+1} a las ${timeStr} → en ${secondsUntilNext}s (${fireAt})`);
+          console.log(`[autoSync] Programando: ${reminder.medName} dosis${doseIndex+1} a las ${timeStr} (recurrente)`);
 
-          const notifId = await Notifications.scheduleNotificationAsync({
-            content: {
-              title: `Hola, ${caregiverName}. Es hora de la siguiente dosis para ${account.name}.`,
-              body: `${doseOrdinal} dosis: ${reminder.medName}${medTypeStr}`,
-              sound: 'tono_recordatorio.mp3',
-              priority: Notifications.AndroidNotificationPriority.HIGH,
-              data: {
-                type: 'external_reminder',
-                ownerName: account.name,
-                medName: reminder.medName,
-                dose: reminder.dose,
-                quantityToTake: reminder.quantityToTake || reminder.quantity_to_take || '--',
-                medType: reminder.medType,
-                doseIndex,
-                time: parsed.hhmm,
-                accountId: account.id,
-                reminderId: reminder.id,
-                days: JSON.stringify(reminder.days || []),
-              },
+          const notifContent = {
+            title: `⏰ Es hora de la dosis de ${account.name}`,
+            body: (() => {
+              const _dose = reminder.dose || '';
+              const _unit = _dose ? (reminder.medStrengthUnit || '') : '';
+              const _str = [_dose, _unit].filter(Boolean).join(' ');
+              const _qty = reminder.quantityToTake || reminder.quantity_to_take || '';
+              const _line1 = `${doseOrdinal} dosis: ${reminder.medName}${_str ? ` — ${_str}` : ''}`;
+              const _line2 = _qty ? `Cantidad: ${_qty}${reminder.medType ? ` ${reminder.medType}` : ''}` : '';
+              return `👋 Hola, ${caregiverName}.\n${_line1}${_line2 ? `\n${_line2}` : ''}`;
+            })(),
+            sound: 'default',
+            priority: Notifications.AndroidNotificationPriority.HIGH,
+            data: {
+              type: 'external_reminder',
+              ownerName: account.name,
+              medName: reminder.medName,
+              dose: reminder.dose,
+              quantityToTake: reminder.quantityToTake || reminder.quantity_to_take || '--',
+              medType: reminder.medType,
+              doseIndex,
+              time: parsed.hhmm,
+              accountId: account.id,
+              reminderId: reminder.id,
+              days: JSON.stringify(reminder.days || []),
             },
-            trigger: {
-              type: Notifications.SchedulableTriggerInputTypes.DATE,
-              date: new Date(nextFireMs),
-              channelId: 'medication-reminders',
-            },
-          });
+          };
 
-          newSynced.push({
-            accountId: account.id,
-            reminderId: reminder.id,
-            doseIndex,
-            time: timeStr,
-            medName: reminder.medName,
-            dose: reminder.dose,
-            ownerName: account.name,
-            days: JSON.stringify(reminder.days || []),
-            notificationId: notifId,
-            nextFireMs,
-          });
+          // Programar notificación RECURRENTE (no de un solo disparo)
+          const scheduled = await scheduleDoseNotifications(notifContent, parsed.hh, parsed.mm, reminder.days);
+
+          for (const { notifId, day } of scheduled) {
+            newSynced.push({
+              accountId: account.id,
+              reminderId: reminder.id,
+              doseIndex,
+              time: timeStr,
+              medName: reminder.medName,
+              dose: reminder.dose,
+              ownerName: account.name,
+              days: JSON.stringify(reminder.days || []),
+              day,
+              notificationId: notifId,
+            });
+          }
         }
       }
 
@@ -1465,11 +1633,23 @@ export default function ConectarRecordatorios() {
                 const { data: { user } } = await authService.getCurrentUser();
                 const caregiverName = user?.user_metadata?.full_name || user?.user_metadata?.name || 'Cuidador';
 
+                // Leer prefs de sonido del cuidador
+                let _caregiverSp = {};
+                try { const _r = await AsyncStorage.getItem('@sound_prefs'); if (_r) _caregiverSp = JSON.parse(_r); } catch (_) {}
+                const _caregiverSound = (!_caregiverSp.selectedNotifTone || _caregiverSp.selectedNotifTone === 'melody_med') ? 'tono_recordatorio' : _caregiverSp.selectedNotifTone;
+
                 notifId = await Notifications.scheduleNotificationAsync({
                     content: {
-                        title: `Hola, ${caregiverName}. Es hora de la siguiente dosis para ${account.name}.`,
-                        body: `Primera dosis: ${reminder.medName}${reminder.medType ? ` (${reminder.medType})` : ''}`,
-                        sound: 'tono_recordatorio.mp3',
+                        title: `⏰ Es hora de la dosis de ${account.name}`,
+                        body: (() => {
+                          const _dose = reminder.dose || '';
+                          const _unit = _dose ? (reminder.medStrengthUnit || '') : '';
+                          const _str = [_dose, _unit].filter(Boolean).join(' ');
+                          const _line1 = `Primera dosis: ${reminder.medName}${_str ? ` — ${_str}` : ''}`;
+                          const _line2 = qty && qty !== '--' ? `Cantidad: ${qty}${qtyUnit}` : '';
+                          return `👋 Hola, ${caregiverName}.\n${_line1}${_line2 ? `\n${_line2}` : ''}`;
+                        })(),
+                        sound: _caregiverSound,
                         priority: Notifications.AndroidNotificationPriority.HIGH,
                         categoryIdentifier: 'medication_pre_reminder',
                         data: {
@@ -1485,8 +1665,10 @@ export default function ConectarRecordatorios() {
                         },
                     },
                     trigger: {
+                      type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
                       hour: parsed.hh,
                       minute: parsed.mm,
+                      second: 0,
                       repeats: true,
                       channelId: 'medication-reminders',
                     },
@@ -2074,7 +2256,7 @@ export default function ConectarRecordatorios() {
                                     return (
                                       <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(46,204,113,0.1)', padding: 8, borderRadius: 10, marginTop: 4 }}>
                                         <Ionicons name="notifications" size={14} color="#2ecc71" style={{ marginRight: 6 }} />
-                                        <Text style={{ color: '#1b5e20', fontWeight: '700', fontSize: 12, flex: 1 }}>
+                                        <Text style={{ color: '#27ae60', fontWeight: '700', fontSize: 12, flex: 1 }}>
                                           Aviso a las {parsed.hhmm} ({whenTxt})
                                         </Text>
                                       </View>

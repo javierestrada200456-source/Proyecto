@@ -1,6 +1,6 @@
 {
   "name": "appmedicamentos",
-  "main": "expo-router/entry",
+  "main": "index.js",
   "version": "1.0.0",
   "scripts": {
     "start": "expo start",
@@ -28,7 +28,7 @@
     "expo-auth-session": "^7.0.10",
     "expo-av": "^16.0.8",
     "expo-background-fetch": "~14.0.9",
-    "expo-calendar": "~15.0.8",
+    "expo-battery": "~10.0.8",
     "expo-camera": "^17.0.10",
     "expo-clipboard": "^8.0.8",
     "expo-constants": "~18.0.10",

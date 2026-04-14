@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { Stack, useRouter } from 'expo-router';
-// import { authService } from '../src/services/supabaseClient';
+import { authService } from '../src/services/supabaseClient';
+import { saveTokenIfAlreadyGranted } from '../src/components/PanelPrincipal/AlarmaYRecordatorio/NotificacionesORecordatorios';
 // import AsyncStorage from '@react-native-async-storage/async-storage';
 // import { setupNotificationListeners } from '../src/components/PanelPrincipal/AlarmaYRecordatorio/NotificacionesORecordatorios';
 import * as SplashScreen from 'expo-splash-screen';
@@ -37,6 +38,18 @@ export default function Layout() {
       });
     }
   }, [fontsLoaded]);
+
+  // Refrescar push token al iniciar sesión (solo si permisos ya otorgados, sin mostrar diálogos)
+  useEffect(() => {
+    const { data: subscription } = authService.onAuthStateChange((event) => {
+      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        saveTokenIfAlreadyGranted().catch(() => {});
+      }
+    });
+    return () => {
+      if (subscription?.subscription?.unsubscribe) subscription.subscription.unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     // Configurar listeners de notificaciones

@@ -45,7 +45,8 @@ export const styles = StyleSheet.create({
   // Header Styles
   header: {
     marginTop: 20,
-    marginBottom: 30,
+    marginBottom: 16,
+    marginHorizontal: isSmallDevice ? 12 : 16,
   },
 
   headerContent: {
@@ -73,7 +74,8 @@ export const styles = StyleSheet.create({
 
   // Progress Indicator
   progressContainer: {
-    marginBottom: 30,
+    marginBottom: 16,
+    marginHorizontal: isSmallDevice ? 12 : 16,
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
     borderRadius: 16,
     padding: 16,

@@ -45,6 +45,54 @@ const CHANNEL_PRE_REMINDER = 'medication-pre-reminders';
 const CHANNEL_ALARM = 'medication-alarms';
 const CHANNEL_INFO = 'medication-info';
 
+// ─── Helper: singular/plural de la forma farmacéutica ───────────────────────
+/**
+ * Devuelve la forma base (primera palabra) correctamente singularizada o pluralizada.
+ * buildFormaLabel('TABLETA RECUBIERTA', 2) → 'Tabletas'
+ * buildFormaLabel('Tableta recubierta', 1) → 'Tableta'
+ */
+function buildFormaLabel(forma, qty) {
+  if (!forma) return '';
+  // Solo la palabra base (sin calificativos como "recubierta", "dura", etc.)
+  const base = forma.trim().split(/\s+/)[0].toLowerCase();
+  const n = parseInt(qty, 10);
+  const capitalized = base.charAt(0).toUpperCase() + base.slice(1);
+  if (isNaN(n) || n === 1) return capitalized; // singular
+  // Pluralizar
+  if (/ción$/i.test(base)) return base.replace(/ción$/i, 'ciones').charAt(0).toUpperCase() + base.replace(/ción$/i, 'ciones').slice(1);
+  if (/[aeiouáéíóú]$/i.test(base)) return capitalized + 's';
+  return capitalized + 'es';
+}
+
+// Convierte a sentence case: primera letra mayúscula, resto minúscula
+function toSentenceCase(str) {
+  if (!str) return '';
+  const s = str.toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
+ * buildNotifBody: arma el cuerpo de la notificación de alarma.
+ * Devuelve { title, body } listos para mostrar.
+ */
+function buildNotifParts({ medName, medStrength, medStrengthUnit, medType, doseTimes, doseIdx, doseLabel }) {
+  // Limpiar medName: si viene en mayúsculas del API, convertir a sentence case
+  const rawName = (medName || '').trim();
+  const name = rawName === rawName.toUpperCase() && rawName.length > 0
+    ? toSentenceCase(rawName)
+    : rawName;
+  const strength = [medStrength, medStrengthUnit].filter(Boolean).join(' ');
+  // Línea 1: Nombre concentración — dosis (sin barra)
+  const nameLine = [name, strength].filter(Boolean).join(' ') + ` — ${doseLabel}`;
+  // Cantidad
+  const qty = doseTimes?.[doseIdx]?.qty || '';
+  const qtyNum = parseInt(qty, 10);
+  const tieneQty = qty && !isNaN(qtyNum) && qtyNum > 0;
+  const formaLabel = tieneQty ? buildFormaLabel(medType, qtyNum) : '';
+  const cantidadLine = tieneQty ? `Cantidad a tomar: ${qty}${formaLabel ? ' ' + formaLabel : ''}` : '';
+  return { nameLine, cantidadLine };
+}
+
 // Configuraciones constantes de tiempo
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -147,6 +195,9 @@ export async function upsertReminderFromAlarmData(data, status = 'pending') {
   }
 }
 
+// Versión del canal de alarma — incrementar cuando cambien sus atributos
+const ALARM_CHANNEL_VERSION = '3'; // v3: sonido tono_recordatorio activa heads-up
+
 async function ensureNotifeeChannels(notifee) {
   if (!notifee?.createChannel) return;
 
@@ -156,10 +207,23 @@ async function ensureNotifeeChannels(notifee) {
     4;
 
   try {
+    // Forzar recreación del canal de alarma cuando cambia la versión
+    // (Android ignora actualizaciones de atributos en canales existentes)
+    const savedChVersion = await AsyncStorage.getItem('@alarm_ch_v').catch(() => null);
+    if (savedChVersion !== ALARM_CHANNEL_VERSION) {
+      try { await notifee.deleteChannel(CHANNEL_ALARM); } catch (_) {}
+      await AsyncStorage.setItem('@alarm_ch_v', ALARM_CHANNEL_VERSION).catch(() => {});
+    }
+
+    // CHANNEL_ALARM: necesita sonido para disparar heads-up popup en todos los dispositivos.
+    // AlarmScreen retomará el audio con expo-av en modo looping.
     await notifee.createChannel({
       id: CHANNEL_ALARM,
       name: 'Alarmas de Medicamentos',
       importance: importanceHigh,
+      sound: 'tono_recordatorio', // ← dispara heads-up; AlarmScreen usa expo-av
+      vibration: true,
+      vibrationPattern: [0, 300, 200, 300],
     });
     await notifee.createChannel({
       id: CHANNEL_PRE_REMINDER,
@@ -407,30 +471,36 @@ export const registerForPushNotificationsAsync = async () => {
   ensureNotificationsConfigured(Notifications);
 
   if (Platform.OS === 'android') {
+    // Leer prefs de sonido/vibración para configurar canales
+    let _sp = {};
+    try { const _r = await AsyncStorage.getItem('@sound_prefs'); if (_r) _sp = JSON.parse(_r); } catch (_) {}
+    const _notifSound = (!_sp.selectedNotifTone || _sp.selectedNotifTone === 'melody_med') ? 'tono_recordatorio' : _sp.selectedNotifTone;
+    const _vibOn = _sp.vibrationEnabled !== false;
+    const _vib = _vibOn ? [250, 250, 250, 250] : null;
+
     await Notifications.setNotificationChannelAsync(CHANNEL_PRE_REMINDER, {
       name: 'Recordatorios (previo)',
-      // IMPORTANCE_MAX para heads-up (banner) con sonido cuando estás en otra app.
       importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 250, 250, 250],
+      ...(_vib ? { vibrationPattern: _vib } : {}),
       lightColor: '#FF231F7C',
-      // Nota: en Android el sonido personalizado depende del canal.
-      // Para que funcione, el archivo debe existir como recurso nativo (res/raw) en builds (Dev Client / EAS).
-      sound: 'tono_recordatorio',
+      sound: _notifSound,
       lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
     });
 
+    // CHANNEL_ALARM: el sonido es necesario para que Android muestre el popup heads-up.
+    // AlarmScreen (expo-av) se encarga del audio en bucle cuando la pantalla se abre.
     await Notifications.setNotificationChannelAsync(CHANNEL_ALARM, {
       name: 'Alarmas de Medicamentos',
       importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 250, 250, 250],
+      ...(_vib ? { vibrationPattern: _vib } : {}),
       lightColor: '#FF231F7C',
+      sound: _notifSound, // ← necesario para heads-up en dispositivos Samsung/Xiaomi/etc.
       lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
     });
 
     await Notifications.setNotificationChannelAsync(CHANNEL_INFO, {
       name: 'Información (siguiente medicación)',
       importance: Notifications.AndroidImportance.DEFAULT,
-      vibrationPattern: [0],
       lightColor: '#FF231F7C',
       sound: null,
     });
@@ -438,7 +508,7 @@ export const registerForPushNotificationsAsync = async () => {
     await Notifications.setNotificationChannelAsync('medication-reminders', {
       name: 'Recordatorios de Medicamentos (legacy)',
       importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 250, 250, 250],
+      vibrationPattern: [250, 250, 250, 250],
       lightColor: '#FF231F7C',
     });
   }
@@ -480,6 +550,20 @@ export const registerForPushNotificationsAsync = async () => {
         }
       } catch (_) { /* el dispositivo puede no admitirlo o el usuario canceló */ }
     }
+
+    // 3. Optimización de batería: solicitar exención para entregas confiables con app cerrada
+    //    Solo se solicita una vez
+    try {
+      const batteryOptRequested = await AsyncStorage.getItem('@battery_opt_requested');
+      if (!batteryOptRequested) {
+        await AsyncStorage.setItem('@battery_opt_requested', '1');
+        const { startActivityAsync } = require('expo-intent-launcher');
+        await startActivityAsync(
+          'android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+          { data: 'package:com.javierestrada.appmedicamentos' }
+        );
+      }
+    } catch (_) { /* best-effort */ }
   }
 
   return finalStatus === 'granted';
@@ -505,9 +589,10 @@ export const registerAndSavePushToken = async () => {
     const tokenResponse = await Notifications.getExpoPushTokenAsync({ projectId });
     if (tokenResponse?.data) {
       const token = tokenResponse.data;
-      const { error } = await supabase
-        .from('push_tokens')
-        .upsert({ user_id: user.id, token }, { onConflict: 'user_id, token' });
+      // Eliminar token viejo del usuario y luego insertar el nuevo
+      // (evita depender de UNIQUE constraint que puede no existir en la tabla)
+      await supabase.from('push_tokens').delete().eq('user_id', user.id);
+      const { error } = await supabase.from('push_tokens').insert({ user_id: user.id, token });
       
       if (error) {
         console.error("Error guardando el push token en Supabase:", error);
@@ -520,6 +605,34 @@ export const registerAndSavePushToken = async () => {
   }
 };
 
+// Guarda el token solo si el permiso YA fue otorgado previamente.
+// NO muestra ningún diálogo de permisos. Usar al iniciar sesión
+// para refrescar el token de usuarios que ya aceptaron permisos.
+export const saveTokenIfAlreadyGranted = async () => {
+  const Notifications = getNotifications();
+  if (!Notifications) return;
+  try {
+    const { status } = await Notifications.getPermissionsAsync();
+    if (status !== 'granted') return; // sin permisos → no hacer nada
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const projectId = Constants?.expoConfig?.extra?.eas?.projectId || Constants?.easConfig?.projectId || 'a1b5bcce-b4bb-4f4b-8924-976ac2aaaed7';
+    if (!projectId) return;
+
+    const tokenResponse = await Notifications.getExpoPushTokenAsync({ projectId });
+    if (tokenResponse?.data) {
+      const token = tokenResponse.data;
+      await supabase.from('push_tokens').delete().eq('user_id', user.id);
+      await supabase.from('push_tokens').insert({ user_id: user.id, token });
+      console.log("[saveTokenIfAlreadyGranted] token actualizado.");
+    }
+  } catch (error) {
+    console.error("[saveTokenIfAlreadyGranted]", error);
+  }
+};
+
 export const scheduleMedicationNotification = async (alarmData) => {
   const Notifications = getNotifications();
   if (!Notifications) {
@@ -529,6 +642,39 @@ export const scheduleMedicationNotification = async (alarmData) => {
   const notifee = getNotifee();
 
   ensureNotificationsConfigured(Notifications);
+
+  // ── Leer preferencias de sonido y vibración guardadas por el usuario ──
+  let soundPrefs = {};
+  try {
+    const raw = await AsyncStorage.getItem('@sound_prefs');
+    if (raw) soundPrefs = JSON.parse(raw);
+  } catch (_) {}
+
+  // ID seleccionado → nombre de recurso Android (para Notifee canales)
+  const resolveSound = (id) => {
+    if (!id || id === 'melody_med') return 'tono_recordatorio';
+    // Notifee solo acepta nombres de recurso (res/raw/), no URIs content://
+    if (id.startsWith('content://') || id.startsWith('android.resource://')) return 'default';
+    return id;
+  };
+
+  // Construye una URI válida para expo-av (AlarmScreen) a partir del tono seleccionado
+  const buildAlarmSoundUri = (selectedTone) => {
+    const PKG = 'com.javierestrada.appmedicamentos';
+    if (!selectedTone || selectedTone === 'melody_med') {
+      return `android.resource://${PKG}/raw/tono_recordatorio`;
+    }
+    if (selectedTone.startsWith('content://') || selectedTone.startsWith('android.resource://')) {
+      return selectedTone; // URI directa — expo-av la puede reproducir
+    }
+    return `android.resource://${PKG}/raw/${selectedTone}`;
+  };
+
+  const notifSound  = resolveSound(soundPrefs.selectedNotifTone);
+  const alarmSound  = resolveSound(soundPrefs.selectedAlarmTone);
+  const vibEnabled  = soundPrefs.vibrationEnabled !== false; // default true
+  // Notifee exige array con número par de valores positivos; si vibración off, no pasamos el campo
+  const vibPattern  = vibEnabled ? [250, 250, 250, 250] : null;
 
   // Asegurar canales + permisos antes de programar (especialmente Android 13+).
   // Esto también reduce fallos de Notifee por channelId inexistente.
@@ -549,7 +695,7 @@ export const scheduleMedicationNotification = async (alarmData) => {
     await ensureNotifeeChannels(notifee);
   }
 
-  const { id: alarmId, medName, dosage, medType, hour, minute, days, reminderMinutes, frequencyHours, medStrength, medStrengthUnit, quantityToTake } = alarmData;
+  const { id: alarmId, medName, dosage, medType, hour, minute, days, reminderMinutes, frequencyHours, medStrength, medStrengthUnit, quantityToTake, quantityPerDose } = alarmData;
   const userName = await getUserName();
   const parsedMinutes = parseInt(reminderMinutes, 10);
   const minutesBefore = Number.isFinite(parsedMinutes) ? parsedMinutes : 5;
@@ -564,9 +710,10 @@ export const scheduleMedicationNotification = async (alarmData) => {
     ? alarmData.times
     : [{ hour: baseHour, minute: baseMinute }];
 
-  const doseTimes = rawTimes.map(t => ({
+  const doseTimes = rawTimes.map((t, i) => ({
     hour: Number.isFinite(parseInt(t.hour, 10)) ? parseInt(t.hour, 10) : baseHour,
     minute: Number.isFinite(parseInt(t.minute, 10)) ? parseInt(t.minute, 10) : baseMinute,
+    qty: t.qty || (Array.isArray(quantityPerDose) ? (quantityPerDose[i] || '') : '') || quantityToTake || '',
   }));
 
   const nowMs = Date.now();
@@ -630,7 +777,7 @@ export const scheduleMedicationNotification = async (alarmData) => {
           medStrength: String(medStrength || ''),
           medStrengthUnit: String(medStrengthUnit || ''),
           medType: String(medType || ''),
-          quantityToTake: String(quantityToTake || ''),
+          quantityToTake: String(doseTimes[doseIdx]?.qty || quantityToTake || ''),
           doseIndex: doseIdx,
           type: 'alarm',
           at: alarmTimeText,
@@ -639,8 +786,8 @@ export const scheduleMedicationNotification = async (alarmData) => {
           // Para evitar abrir alarmas viejas en frío
           fireTimestamp: Number(tMs),
           alarmTimestamp: Number(tMs),
-          // Datos del sonido personalizado para AlarmScreen
-          soundUri: typeof alarmData.soundUri === 'string' ? alarmData.soundUri : '',
+          // URI reproducible por expo-av en AlarmScreen (android.resource:// o content://)
+          soundUri: buildAlarmSoundUri(soundPrefs.selectedAlarmTone),
           soundVolume: Number(alarmData.soundVolume || 1),
           soundStartSeconds: Number(alarmData.soundStartSeconds || 0),
         };
@@ -663,10 +810,19 @@ export const scheduleMedicationNotification = async (alarmData) => {
           };
 
           try {
+            const { nameLine, cantidadLine } = buildNotifParts({
+              medName, medStrength, medStrengthUnit, medType,
+              doseTimes, doseIdx, doseLabel,
+            });
+            // Título limpio: "Es hora de tomar:"
+            // Cuerpo: nombre/concentración — Primera dosis \nCantidad a tomar: 2 Tabletas
+            const _alarmBody = cantidadLine
+              ? `<b>${nameLine}</b>\n<font color="#4facfe">${cantidadLine}</font>`
+              : `<b>${nameLine}</b>`;
             const id = await notifee.createTriggerNotification(
               {
-                title: 'AppMedicamentos',
-                body: `Es hora de tomar: ${medName}\n${doseLabel}`,
+                title: 'Es hora de tomar:',
+                body: _alarmBody,
                 data: alarmPayloadData,
                 android: {
                   channelId: CHANNEL_ALARM,
@@ -690,7 +846,8 @@ export const scheduleMedicationNotification = async (alarmData) => {
                   visibility: AndroidVisibility.PUBLIC,
                   ongoing: true,
                   autoCancel: false,
-                  sound: 'default',
+                  // sin sonido: AlarmScreen reproduce el audio via expo-av
+                  ...(vibPattern ? { vibrationPattern: vibPattern } : {}),
                 },
               },
               trigger
@@ -704,11 +861,18 @@ export const scheduleMedicationNotification = async (alarmData) => {
           }
         } else {
           // iOS (sin Notifee): se dispara notificación normal.
+          const { nameLine: _nameLine, cantidadLine: _cantidadLine } = buildNotifParts({
+            medName, medStrength, medStrengthUnit, medType,
+            doseTimes, doseIdx, doseLabel,
+          });
+          const _alarmBodyIos = _cantidadLine
+            ? `${_nameLine}\n${_cantidadLine}`
+            : _nameLine;
           const alarmIdScheduled = await Notifications.scheduleNotificationAsync({
             content: {
-              title: 'AppMedicamentos',
-              body: `Es hora de tomar: ${medName}\n${doseLabel}`,
-              sound: 'default',
+              title: 'Es hora de tomar:',
+              body: _alarmBodyIos,
+              sound: null,
               priority: Notifications.AndroidNotificationPriority.MAX,
               data: alarmPayloadData,
               sticky: true,
@@ -729,7 +893,9 @@ export const scheduleMedicationNotification = async (alarmData) => {
           const preTimeText = formatLocalTimeFromTimestamp(preMs);
           
           // Nuevo formato solicitado
-          const bodyText = `Hola ${userName},\n\nTe recordamos que en ${minutesBefore} minutos debes tomar:\n\n\u2022 ${medName} (${doseLabel})${medStrength ? ` - ${medStrength} ${medStrengthUnit || ''}`.trim() : ''}${medType ? `\n\u2022 Tipo: ${medType}` : ''}`;
+          const _preStrength = [medStrength, medStrengthUnit].filter(Boolean).join(' ');
+          const _preLine2 = `<font color="#4facfe">${medName} — ${doseLabel}${_preStrength ? `: ${_preStrength}` : ''}</font>`;
+          const bodyText = `<b>${userName}</b>, te recordamos que en ${minutesBefore} min debes tomar:\n${_preLine2}`;
 
           if (Platform.OS === 'android' && notifee) {
             ensureNotifeeTriggerSupport(notifee);
@@ -745,7 +911,7 @@ export const scheduleMedicationNotification = async (alarmData) => {
                   dosage: String(dosage || ''),
                   medStrength: String(medStrength || ''),
                   medType: String(medType || ''),
-                  quantityToTake: String(quantityToTake || ''),
+                  quantityToTake: String(doseTimes[doseIdx]?.qty || quantityToTake || ''),
                   type: 'pre_reminder',
                   at: alarmTimeText,
                   preAt: preTimeText,
@@ -757,7 +923,8 @@ export const scheduleMedicationNotification = async (alarmData) => {
                   pressAction: { id: 'default', launchActivity: 'default' },
                   visibility: AndroidVisibility.PUBLIC,
                   autoCancel: true,
-                  sound: typeof alarmData.soundUri === 'string' && alarmData.soundUri ? alarmData.soundUri : 'tono_recordatorio',
+                  sound: notifSound,
+                  ...(vibPattern ? { vibrationPattern: vibPattern } : {}),
                 },
               },
               {
@@ -773,7 +940,7 @@ export const scheduleMedicationNotification = async (alarmData) => {
                 title: 'AppMedicamentos',
                 body: bodyText,
                 // Usar el tono personalizado del alarm si existe
-                sound: typeof alarmData.soundUri === 'string' && alarmData.soundUri ? alarmData.soundUri : 'tono_recordatorio',
+                sound: notifSound,
                 priority: Notifications.AndroidNotificationPriority.MAX,
                 data: { 
                     alarmId, medName, dosage, medStrength, medType, quantityToTake,
@@ -842,6 +1009,14 @@ export async function triggerSnooze(data) {
 
   const { medName } = data;
 
+  // Conservar soundUri del data original para que AlarmScreen pueda reproducirlo
+  const PKG = 'com.javierestrada.appmedicamentos';
+  const snoozeData = {
+    ...data,
+    type: 'alarm',
+    soundUri: data.soundUri || `android.resource://${PKG}/raw/tono_recordatorio`,
+  };
+
   // Si hay Notifee, mantenemos el comportamiento de pantalla completa también en snooze.
   if (Platform.OS === 'android' && notifee) {
     ensureNotifeeTriggerSupport(notifee);
@@ -853,7 +1028,7 @@ export async function triggerSnooze(data) {
         {
           title: 'AppMedicamentos',
           body: `Alarma pospuesta: Tomar ${medName}`,
-          data: { ...data, type: 'alarm', fireTimestamp: ts },
+          data: { ...snoozeData, fireTimestamp: ts },
           android: {
             channelId: CHANNEL_ALARM,
             category: AndroidCategory.ALARM,
@@ -868,7 +1043,7 @@ export async function triggerSnooze(data) {
             visibility: AndroidVisibility.PUBLIC,
             ongoing: true,
             autoCancel: false,
-            sound: 'default',
+            // Sin override de sonido → usa el del canal (tono_recordatorio) para heads-up
           },
         },
         {
@@ -889,7 +1064,7 @@ export async function triggerSnooze(data) {
     content: {
       title: 'AppMedicamentos',
       body: `Alarma pospuesta: Tomar ${medName}`,
-      sound: 'default',
+      // Sin sonido: el canal (medication-alarms) ya lo tiene, y AlarmScreen usa expo-av
       data: data,
       categoryIdentifier: CATEGORY_ALARM,
       sticky: true,

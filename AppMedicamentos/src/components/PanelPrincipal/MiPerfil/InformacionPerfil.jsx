@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -24,6 +24,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import styles from './InformacionPerfil.Styles';
 import { useTheme } from '../../../context/ThemeContext';
 import { Switch } from 'react-native';
+import { Audio } from 'expo-av';
+import * as Haptics from 'expo-haptics';
+import Slider from '@react-native-community/slider';
+import { getSystemNotificationTones, getSystemAlarmTones } from '../../../services/RingtoneManager';
 
 const { width } = Dimensions.get('window');
 
@@ -57,6 +61,141 @@ export default function InformacionPerfil({ onBack }) {
   const [showLogoutModal, setShowLogoutModal] = useState(false);
   const [profileImage, setProfileImage] = useState(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
+  // Estados de configuración de sonidos
+  const [soundModalVisible, setSoundModalVisible] = useState(false);
+  const [selectedNotifTone, setSelectedNotifTone] = useState('melody_med');
+  const [selectedAlarmTone, setSelectedAlarmTone] = useState('melody_med');
+  const [vibrationEnabled, setVibrationEnabled] = useState(true);
+  const [notifVolume, setNotifVolume] = useState(0.8);
+  const [alarmVolume, setAlarmVolume] = useState(1.0);
+  const [playingTone, setPlayingTone] = useState(null);
+  const soundRef = useRef(null);
+  const [systemNotifTones, setSystemNotifTones] = useState([]);
+  const [systemAlarmTones, setSystemAlarmTones] = useState([]);
+  const [loadingTones, setLoadingTones] = useState(false);
+  const [tonePickerVisible, setTonePickerVisible] = useState(false);
+  const [tonePickerMode, setTonePickerMode] = useState('notif'); // 'notif' | 'alarm'
+
+  const APP_TONES = [
+    { id: 'melody_med', label: 'Melodía Medicamento', file: require('../../../../assets/sounds/tono_recordatorio.mp3'), isApp: true },
+  ];
+
+  useEffect(() => {
+    loadSoundPrefs();
+    return () => { if (soundRef.current) soundRef.current.unloadAsync(); };
+  }, []);
+
+  const openSoundModal = async () => {
+    setSoundModalVisible(true);
+    if (systemNotifTones.length === 0) {
+      setLoadingTones(true);
+      const [notif, alarm] = await Promise.all([
+        getSystemNotificationTones(),
+        getSystemAlarmTones(),
+      ]);
+      setSystemNotifTones(notif);
+      setSystemAlarmTones(alarm);
+      setLoadingTones(false);
+    }
+  };
+
+  const loadSoundPrefs = async () => {
+    try {
+      const prefs = await AsyncStorage.getItem('@sound_prefs');
+      if (prefs) {
+        const p = JSON.parse(prefs);
+        if (p.selectedNotifTone) setSelectedNotifTone(p.selectedNotifTone);
+        if (p.selectedAlarmTone) setSelectedAlarmTone(p.selectedAlarmTone);
+        if (p.vibrationEnabled !== undefined) setVibrationEnabled(p.vibrationEnabled);
+        if (p.notifVolume !== undefined) setNotifVolume(p.notifVolume);
+        if (p.alarmVolume !== undefined) setAlarmVolume(p.alarmVolume);
+      }
+    } catch (_) {}
+  };
+
+  const saveSoundPrefs = async () => {
+    try {
+      await AsyncStorage.setItem('@sound_prefs', JSON.stringify({
+        selectedNotifTone, selectedAlarmTone, vibrationEnabled, notifVolume, alarmVolume,
+      }));
+      setSoundModalVisible(false);
+    } catch (_) {}
+  };
+
+  const previewTone = async (tone) => {
+    try {
+      if (soundRef.current) {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      }
+      if (playingTone === tone.id) { setPlayingTone(null); return; }
+      if (!tone.isApp && !tone.uri) { setPlayingTone(null); return; }
+
+      await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
+
+      let source;
+      if (tone.isApp && tone.file) {
+        source = tone.file;
+      } else if (tone.uri) {
+        source = { uri: tone.uri };
+      } else {
+        setPlayingTone(null);
+        return;
+      }
+
+      const { sound } = await Audio.Sound.createAsync(source, {
+        shouldPlay: true,
+        volume: notifVolume,
+      });
+      soundRef.current = sound;
+      setPlayingTone(tone.id);
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.didJustFinish) {
+          setPlayingTone(null);
+          sound.unloadAsync();
+          soundRef.current = null;
+        }
+      });
+    } catch (_) { setPlayingTone(null); }
+  };
+
+  const handleVibrationToggle = (val) => {
+    setVibrationEnabled(val);
+    if (val) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  };
+
+  const getSelectedToneLabel = (mode) => {
+    const id = mode === 'notif' ? selectedNotifTone : selectedAlarmTone;
+    const list = mode === 'notif'
+      ? [...APP_TONES, ...systemNotifTones]
+      : [...systemAlarmTones];
+    return list.find(t => t.id === id)?.label ?? 'Sin tono';
+  };
+
+  const openTonePicker = (mode) => {
+    setTonePickerMode(mode);
+    setTonePickerVisible(true);
+  };
+
+  const selectToneInPicker = (tone) => {
+    if (tonePickerMode === 'notif') setSelectedNotifTone(tone.id);
+    else setSelectedAlarmTone(tone.id);
+    previewTone(tone);
+  };
+
+  const closeTonePicker = async () => {
+    setTonePickerVisible(false);
+    if (soundRef.current) {
+      try {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+      } catch (_) {}
+      soundRef.current = null;
+    }
+    setPlayingTone(null);
+  };
 
   useEffect(() => {
     const loadUserInfo = async () => {
@@ -223,11 +362,12 @@ export default function InformacionPerfil({ onBack }) {
 
       const ageNum = editDraft.age ? parseInt(editDraft.age, 10) : null;
       const weightNum = editDraft.weight ? parseFloat(editDraft.weight) : null;
+      const cleanName = (editDraft.name || '').trim() || null;
 
       const updates = {
-        name: (editDraft.name || '').trim() || null,
+        name: cleanName,
+        full_name: cleanName,   // para que el cuidador lo vea siempre correctamente
         age: Number.isFinite(ageNum) ? ageNum : null,
-        gender: (editDraft.gender || '').trim() || null,
         weight: Number.isFinite(weightNum) ? weightNum : null,
         blood_type: (editDraft.bloodType || '').trim() || null,
         allergies: (editDraft.allergies || '').trim() || null,
@@ -564,7 +704,32 @@ export default function InformacionPerfil({ onBack }) {
               />
             </View>
 
-            {/* Action Buttons */}
+            {/* Botón Sonidos y Tonos */}
+            <TouchableOpacity
+              onPress={openSoundModal}
+              activeOpacity={0.8}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(102, 126, 234, 0.05)',
+                borderRadius: 16,
+                padding: 16,
+                marginBottom: 20,
+                width: '100%',
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <View style={[styles.infoIconContainer, { backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : '#fff' }]}>
+                  <Ionicons name="musical-notes" size={20} color="#667eea" />
+                </View>
+                <View>
+                  <Text style={{ fontSize: 15, fontWeight: '600', color: isDark ? '#EEE' : '#333' }}>Sonidos y Tonos</Text>
+                  <Text style={{ fontSize: 11, color: isDark ? '#888' : '#999', marginTop: 1 }}>Alarmas, notificaciones y vibración</Text>
+                </View>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={isDark ? '#666' : '#bbb'} />
+            </TouchableOpacity>
             <View style={styles.buttonContainer}>
               <TouchableOpacity
                 style={styles.editButton}
@@ -601,8 +766,11 @@ export default function InformacionPerfil({ onBack }) {
             animationType="slide"
             onRequestClose={cancelEdit}
         >
-            <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 20 }}>
-                <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1, justifyContent: 'center' }}>
+            <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' }}>
+                <KeyboardAvoidingView
+                    behavior={Platform.OS === 'ios' ? 'padding' : 'padding'}
+                    style={{ flex: 1, justifyContent: 'center', padding: 20 }}
+                >
                     <Animatable.View 
                         animation="zoomIn" 
                         duration={300} 
@@ -610,7 +778,7 @@ export default function InformacionPerfil({ onBack }) {
                             backgroundColor: isDark ? theme.card : '#fff', 
                             borderRadius: 24, 
                             padding: 24, 
-                            maxHeight: '85%',
+                            maxHeight: '90%',
                             shadowColor: "#000",
                             shadowOffset: { width: 0, height: 10 },
                             shadowOpacity: 0.3,
@@ -625,13 +793,15 @@ export default function InformacionPerfil({ onBack }) {
                             </TouchableOpacity>
                         </View>
                         
-                        <ScrollView showsVerticalScrollIndicator={false}>
+                        <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
                             <Text style={{ fontSize: 13, fontWeight: '700', color: '#667eea', marginBottom: 8, marginTop: 4 }}>Nombre</Text>
                             <TextInput
                                 value={editDraft.name}
                                 onChangeText={(t) => setEditDraft((p) => ({ ...p, name: t }))}
                                 placeholder="Tu nombre"
                                 placeholderTextColor={isDark ? "#94a3b8" : "#999"}
+                                returnKeyType="next"
+                                blurOnSubmit={false}
                                 style={{ borderWidth: 1, borderColor: isDark ? '#475569' : '#e1e4e8', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, marginBottom: 16, color: isDark ? '#fff' : '#333', fontSize: 16, backgroundColor: isDark ? '#334155' : '#f9f9f9' }}
                             />
 
@@ -660,15 +830,6 @@ export default function InformacionPerfil({ onBack }) {
                                 </View>
                             </View>
 
-                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#667eea', marginBottom: 8 }}>Género</Text>
-                            <TextInput
-                                value={editDraft.gender}
-                                onChangeText={(t) => setEditDraft((p) => ({ ...p, gender: t }))}
-                                placeholder="Ej. Masculino"
-                                placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                                style={{ borderWidth: 1, borderColor: isDark ? '#475569' : '#e1e4e8', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, marginBottom: 16, color: isDark ? '#fff' : '#333', fontSize: 16, backgroundColor: isDark ? '#334155' : '#f9f9f9' }}
-                            />
-
                             <Text style={{ fontSize: 13, fontWeight: '700', color: '#667eea', marginBottom: 8 }}>Condiciones médicas</Text>
                             <TextInput
                                 value={editDraft.medicalConditions}
@@ -676,6 +837,25 @@ export default function InformacionPerfil({ onBack }) {
                                 placeholder="Ej. Hipertensión (Opcional)"
                                 placeholderTextColor={isDark ? "#94a3b8" : "#999"}
                                 style={{ borderWidth: 1, borderColor: isDark ? '#475569' : '#e1e4e8', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, marginBottom: 16, color: isDark ? '#fff' : '#333', fontSize: 16, backgroundColor: isDark ? '#334155' : '#f9f9f9' }}
+                            />
+
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#667eea', marginBottom: 8 }}>Alergias</Text>
+                            <TextInput
+                                value={editDraft.allergies}
+                                onChangeText={(t) => setEditDraft((p) => ({ ...p, allergies: t }))}
+                                placeholder="Ej. Penicilina (Opcional)"
+                                placeholderTextColor={isDark ? "#94a3b8" : "#999"}
+                                style={{ borderWidth: 1, borderColor: isDark ? '#475569' : '#e1e4e8', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, marginBottom: 16, color: isDark ? '#fff' : '#333', fontSize: 16, backgroundColor: isDark ? '#334155' : '#f9f9f9' }}
+                            />
+
+                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#667eea', marginBottom: 8 }}>Contacto de Emergencia</Text>
+                            <TextInput
+                                value={editDraft.emergencyContact}
+                                onChangeText={(t) => setEditDraft((p) => ({ ...p, emergencyContact: t }))}
+                                placeholder="Número o nombre"
+                                placeholderTextColor={isDark ? "#94a3b8" : "#999"}
+                                keyboardType="phone-pad"
+                                style={{ borderWidth: 1, borderColor: isDark ? '#475569' : '#e1e4e8', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, marginBottom: 24, color: isDark ? '#fff' : '#333', fontSize: 16, backgroundColor: isDark ? '#334155' : '#f9f9f9' }}
                             />
                             
                             <View style={{ flexDirection: 'row', gap: 12, marginBottom: 10 }}>
@@ -758,6 +938,369 @@ export default function InformacionPerfil({ onBack }) {
             </Animatable.View>
           </View>
         </Modal>
+
+        {/* ─── Modal Sonidos y Tonos ─── */}
+        <Modal
+          visible={soundModalVisible}
+          animationType="slide"
+          transparent
+          onRequestClose={() => setSoundModalVisible(false)}
+        >
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'flex-end' }}>
+            <Animatable.View
+              animation="slideInUp"
+              duration={380}
+              style={{
+                backgroundColor: isDark ? '#0f172a' : '#f8fafc',
+                borderTopLeftRadius: 28,
+                borderTopRightRadius: 28,
+                maxHeight: '92%',
+                paddingBottom: 32,
+              }}
+            >
+              {/* Handle bar */}
+              <View style={{ alignItems: 'center', paddingTop: 12, marginBottom: 4 }}>
+                <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: isDark ? '#334155' : '#cbd5e1' }} />
+              </View>
+
+              {/* Header */}
+              <LinearGradient
+                colors={isDark ? ['#1e293b', '#0f172a'] : ['#667eea', '#764ba2']}
+                start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+                style={{ marginHorizontal: 16, borderRadius: 18, padding: 18, marginBottom: 8 }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <View style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                      <Ionicons name="musical-notes" size={22} color="#fff" />
+                    </View>
+                    <View>
+                      <Text style={{ color: '#fff', fontWeight: '800', fontSize: 18 }}>Sonidos y Tonos</Text>
+                      <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>Alarmas, notificaciones y vibración</Text>
+                    </View>
+                  </View>
+                  <TouchableOpacity onPress={() => setSoundModalVisible(false)}>
+                    <Ionicons name="close-circle" size={30} color="rgba(255,255,255,0.7)" />
+                  </TouchableOpacity>
+                </View>
+              </LinearGradient>
+
+              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 16 }}>
+
+                {/* ── SECCIÓN: Tono de notificación ── */}
+                <View style={{ marginBottom: 12, marginTop: 8 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#8b5cf6', marginRight: 8 }} />
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: isDark ? '#94a3b8' : '#64748b', letterSpacing: 0.8, textTransform: 'uppercase' }}>
+                      Notificaciones
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => openTonePicker('notif')}
+                    activeOpacity={0.7}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center',
+                      backgroundColor: isDark ? '#1e293b' : '#fff',
+                      borderRadius: 16, padding: 16,
+                      borderWidth: 1, borderColor: isDark ? '#1e293b' : '#e2e8f0',
+                    }}
+                  >
+                    <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: isDark ? '#334155' : '#ede9fe', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                      <Ionicons name="notifications" size={20} color="#8b5cf6" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>
+                        {getSelectedToneLabel('notif')}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: isDark ? '#64748b' : '#94a3b8', marginTop: 2 }}>Toca para cambiar</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={isDark ? '#475569' : '#94a3b8'} />
+                  </TouchableOpacity>
+                </View>
+
+                {/* ── SECCIÓN: Tono de alarma ── */}
+                <View style={{ marginBottom: 20 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#f093fb', marginRight: 8 }} />
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: isDark ? '#94a3b8' : '#64748b', letterSpacing: 0.8, textTransform: 'uppercase' }}>
+                      Alarma · Pantalla de bloqueo
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => openTonePicker('alarm')}
+                    activeOpacity={0.7}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center',
+                      backgroundColor: isDark ? '#1e293b' : '#fff',
+                      borderRadius: 16, padding: 16,
+                      borderWidth: 1, borderColor: isDark ? '#1e293b' : '#e2e8f0',
+                    }}
+                  >
+                    <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: isDark ? '#334155' : '#fdf4ff', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                      <Ionicons name="alarm" size={20} color="#f093fb" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>
+                        {getSelectedToneLabel('alarm')}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: isDark ? '#64748b' : '#94a3b8', marginTop: 2 }}>Toca para cambiar</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={isDark ? '#475569' : '#94a3b8'} />
+                  </TouchableOpacity>
+                </View>
+
+                {/* ── SECCIÓN: Niveles de volumen ── */}
+                <View style={{ marginBottom: 20 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#38bdf8', marginRight: 8 }} />
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: isDark ? '#94a3b8' : '#64748b', letterSpacing: 0.8, textTransform: 'uppercase' }}>
+                      Niveles de volumen
+                    </Text>
+                  </View>
+
+                  {/* Volumen notificaciones */}
+                  <View style={{ backgroundColor: isDark ? '#1e293b' : '#fff', borderRadius: 16, padding: 16, marginBottom: 8 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Ionicons name="notifications" size={16} color="#38bdf8" style={{ marginRight: 8 }} />
+                        <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>Notificaciones</Text>
+                      </View>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: '#38bdf8' }}>{Math.round(notifVolume * 100)}%</Text>
+                    </View>
+                    <Slider
+                      style={{ width: '100%', height: 36 }}
+                      minimumValue={0}
+                      maximumValue={1}
+                      value={notifVolume}
+                      onValueChange={setNotifVolume}
+                      minimumTrackTintColor="#38bdf8"
+                      maximumTrackTintColor={isDark ? '#334155' : '#e2e8f0'}
+                      thumbTintColor="#38bdf8"
+                    />
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                      <Text style={{ fontSize: 10, color: isDark ? '#475569' : '#94a3b8' }}>0%</Text>
+                      <View style={{ alignItems: 'center' }}>
+                        <View style={{ width: 1, height: 6, backgroundColor: '#38bdf8', opacity: 0.5 }} />
+                        <Text style={{ fontSize: 10, color: '#38bdf8', fontWeight: '700' }}>Recomendado: 80%+</Text>
+                      </View>
+                      <Text style={{ fontSize: 10, color: isDark ? '#475569' : '#94a3b8' }}>100%</Text>
+                    </View>
+                    {notifVolume < 0.6 && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: 'rgba(251,191,36,0.1)', borderRadius: 8, padding: 8 }}>
+                        <Ionicons name="warning" size={14} color="#FBBF24" style={{ marginRight: 6 }} />
+                        <Text style={{ fontSize: 11, color: '#FBBF24', fontWeight: '600' }}>Volumen bajo — puedes perder recordatorios</Text>
+                      </View>
+                    )}
+                  </View>
+
+                  {/* Volumen alarma */}
+                  <View style={{ backgroundColor: isDark ? '#1e293b' : '#fff', borderRadius: 16, padding: 16 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Ionicons name="alarm" size={16} color="#f093fb" style={{ marginRight: 8 }} />
+                        <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>Alarmas</Text>
+                      </View>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: '#f093fb' }}>{Math.round(alarmVolume * 100)}%</Text>
+                    </View>
+                    <Slider
+                      style={{ width: '100%', height: 36 }}
+                      minimumValue={0}
+                      maximumValue={1}
+                      value={alarmVolume}
+                      onValueChange={setAlarmVolume}
+                      minimumTrackTintColor="#f093fb"
+                      maximumTrackTintColor={isDark ? '#334155' : '#e2e8f0'}
+                      thumbTintColor="#f093fb"
+                    />
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                      <Text style={{ fontSize: 10, color: isDark ? '#475569' : '#94a3b8' }}>0%</Text>
+                      <View style={{ alignItems: 'center' }}>
+                        <View style={{ width: 1, height: 6, backgroundColor: '#f093fb', opacity: 0.5 }} />
+                        <Text style={{ fontSize: 10, color: '#f093fb', fontWeight: '700' }}>Recomendado: 100%</Text>
+                      </View>
+                      <Text style={{ fontSize: 10, color: isDark ? '#475569' : '#94a3b8' }}>100%</Text>
+                    </View>
+                    {alarmVolume < 0.8 && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: 'rgba(239,68,68,0.1)', borderRadius: 8, padding: 8 }}>
+                        <Ionicons name="warning" size={14} color="#ef4444" style={{ marginRight: 6 }} />
+                        <Text style={{ fontSize: 11, color: '#ef4444', fontWeight: '600' }}>Las alarmas deben estar al máximo para despertarte</Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+
+                {/* ── SECCIÓN: Vibración ── */}
+                <View style={{ marginBottom: 24 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#4ade80', marginRight: 8 }} />
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: isDark ? '#94a3b8' : '#64748b', letterSpacing: 0.8, textTransform: 'uppercase' }}>
+                      Vibración
+                    </Text>
+                  </View>
+                  <View style={{
+                    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                    backgroundColor: isDark ? '#1e293b' : '#fff',
+                    borderRadius: 16, padding: 16,
+                  }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <View style={{ width: 38, height: 38, borderRadius: 19, backgroundColor: isDark ? '#334155' : '#f0fdf4', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                        <Ionicons name="phone-portrait" size={20} color="#4ade80" />
+                      </View>
+                      <View>
+                        <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>Vibración en alarmas</Text>
+                        <Text style={{ fontSize: 11, color: isDark ? '#64748b' : '#94a3b8', marginTop: 1 }}>
+                          {vibrationEnabled ? 'Activada' : 'Desactivada'}
+                        </Text>
+                      </View>
+                    </View>
+                    <Switch
+                      trackColor={{ false: isDark ? '#334155' : '#e2e8f0', true: '#4ade80' }}
+                      thumbColor={vibrationEnabled ? '#fff' : isDark ? '#475569' : '#f4f3f4'}
+                      onValueChange={handleVibrationToggle}
+                      value={vibrationEnabled}
+                    />
+                  </View>
+                </View>
+
+                {/* Botón Guardar */}
+                <TouchableOpacity onPress={saveSoundPrefs} activeOpacity={0.85}>
+                  <LinearGradient
+                    colors={['#667eea', '#764ba2']}
+                    start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+                    style={{ borderRadius: 16, paddingVertical: 16, alignItems: 'center', flexDirection: 'row', justifyContent: 'center' }}
+                  >
+                    <Ionicons name="save" size={18} color="#fff" style={{ marginRight: 8 }} />
+                    <Text style={{ color: '#fff', fontWeight: '800', fontSize: 16 }}>Guardar configuración</Text>
+                  </LinearGradient>
+                </TouchableOpacity>
+
+              </ScrollView>
+            </Animatable.View>
+          </View>
+        </Modal>
+
+        {/* ─── Mini-modal Selector de Tono ─── */}
+        <Modal
+          visible={tonePickerVisible}
+          animationType="fade"
+          transparent
+          onRequestClose={closeTonePicker}
+        >
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 }}>
+            <Animatable.View
+              animation="zoomIn"
+              duration={250}
+              style={{
+                backgroundColor: isDark ? '#0f172a' : '#f8fafc',
+                borderRadius: 24,
+                width: '100%',
+                maxHeight: '75%',
+                overflow: 'hidden',
+              }}
+            >
+              {/* Header */}
+              <View style={{
+                flexDirection: 'row', alignItems: 'center',
+                paddingHorizontal: 20, paddingVertical: 16,
+                borderBottomWidth: 1, borderBottomColor: isDark ? '#1e293b' : '#e2e8f0',
+              }}>
+                <View style={{
+                  width: 36, height: 36, borderRadius: 18,
+                  backgroundColor: tonePickerMode === 'notif' ? (isDark ? '#334155' : '#ede9fe') : (isDark ? '#334155' : '#fdf4ff'),
+                  alignItems: 'center', justifyContent: 'center', marginRight: 12,
+                }}>
+                  <Ionicons
+                    name={tonePickerMode === 'notif' ? 'notifications' : 'alarm'}
+                    size={18}
+                    color={tonePickerMode === 'notif' ? '#8b5cf6' : '#f093fb'}
+                  />
+                </View>
+                <Text style={{ fontWeight: '800', fontSize: 16, color: isDark ? '#f1f5f9' : '#1e293b', flex: 1 }}>
+                  {tonePickerMode === 'notif' ? 'Tono de notificación' : 'Tono de alarma'}
+                </Text>
+                <TouchableOpacity onPress={closeTonePicker} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Ionicons name="close" size={24} color={isDark ? '#64748b' : '#94a3b8'} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Lista de tonos */}
+              {loadingTones ? (
+                <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: 40 }}>
+                  <ActivityIndicator size="large" color={tonePickerMode === 'notif' ? '#8b5cf6' : '#f093fb'} />
+                  <Text style={{ marginTop: 12, color: isDark ? '#64748b' : '#94a3b8', fontSize: 13 }}>Cargando tonos...</Text>
+                </View>
+              ) : (
+                <ScrollView
+                  showsVerticalScrollIndicator={false}
+                  contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 8 }}
+                >
+                  {(tonePickerMode === 'notif'
+                    ? [...APP_TONES, ...systemNotifTones]
+                    : [...systemAlarmTones]
+                  ).map((tone) => {
+                    const isSelected = tonePickerMode === 'notif'
+                      ? selectedNotifTone === tone.id
+                      : selectedAlarmTone === tone.id;
+                    const accentColor = tonePickerMode === 'notif' ? '#8b5cf6' : '#f093fb';
+                    const isPlaying = playingTone === tone.id;
+                    return (
+                      <TouchableOpacity
+                        key={tone.id}
+                        onPress={() => selectToneInPicker(tone)}
+                        activeOpacity={0.7}
+                        style={{
+                          flexDirection: 'row', alignItems: 'center',
+                          backgroundColor: isSelected ? (isDark ? '#1e293b' : '#f5f3ff') : 'transparent',
+                          borderRadius: 14, padding: 14, marginBottom: 4,
+                          borderWidth: isSelected ? 1.5 : 1,
+                          borderColor: isSelected ? accentColor : isDark ? '#1e293b' : '#e2e8f0',
+                        }}
+                      >
+                        <View style={{
+                          width: 22, height: 22, borderRadius: 11,
+                          borderWidth: 2,
+                          borderColor: isSelected ? accentColor : isDark ? '#475569' : '#cbd5e1',
+                          alignItems: 'center', justifyContent: 'center', marginRight: 12,
+                        }}>
+                          {isSelected && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: accentColor }} />}
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{
+                            fontWeight: isSelected ? '700' : '500',
+                            fontSize: 14,
+                            color: isSelected ? (isDark ? '#f1f5f9' : '#1e293b') : (isDark ? '#94a3b8' : '#475569'),
+                          }}>
+                            {tone.label}
+                          </Text>
+                          {tone.isApp && (
+                            <Text style={{ fontSize: 10, color: isDark ? '#475569' : '#94a3b8', marginTop: 1 }}>App</Text>
+                          )}
+                        </View>
+                        {isPlaying && (
+                          <ActivityIndicator size="small" color={accentColor} style={{ marginLeft: 8 }} />
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              )}
+
+              {/* Botón Listo */}
+              <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16 }}>
+                <TouchableOpacity onPress={closeTonePicker} activeOpacity={0.85}>
+                  <LinearGradient
+                    colors={tonePickerMode === 'notif' ? ['#8b5cf6', '#6d28d9'] : ['#f093fb', '#c026d3']}
+                    start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+                    style={{ borderRadius: 14, paddingVertical: 14, alignItems: 'center' }}
+                  >
+                    <Text style={{ color: '#fff', fontWeight: '800', fontSize: 15 }}>Listo</Text>
+                  </LinearGradient>
+                </TouchableOpacity>
+              </View>
+            </Animatable.View>
+          </View>
+        </Modal>
+
       </SafeAreaView>
     </LinearGradient>
   );

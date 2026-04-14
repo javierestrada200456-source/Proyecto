@@ -19,12 +19,12 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Animatable from 'react-native-animatable';
 import { Ionicons } from '@expo/vector-icons';
-import * as Calendar from 'expo-calendar';
 import * as Notifications from 'expo-notifications';
 import { useCameraPermissions } from 'expo-camera';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as Application from 'expo-application';
 import styles from './StylesBienvenida';
+import { registerAndSavePushToken } from '../../components/PanelPrincipal/AlarmaYRecordatorio/NotificacionesORecordatorios';
 
 const { AlarmModule } = NativeModules;
 
@@ -35,17 +35,17 @@ export default function Bienvenida({ onContinue }) {
 
   const [permissionsState, setPermissionsState] = useState({
     notifications: false,
-    calendar: false,
     background: false,
     camera: false,
     exactAlarm: false,
+    fullscreen: false,
   });
   const [permissionsStatus, setPermissionsStatus] = useState({
     notifications: null,
-    calendar: null,
     background: null,
     camera: null,
     exactAlarm: null,
+    fullscreen: null,
   });
   const [allGranted, setAllGranted] = useState(false);
   const [showBackgroundModal, setShowBackgroundModal] = useState(false);
@@ -55,9 +55,6 @@ export default function Bienvenida({ onContinue }) {
       // Verificar permisos reales de notificación
       const { status: notifStatus } = await Notifications.getPermissionsAsync();
       const notifGranted = notifStatus === 'granted';
-
-      const cal = await Calendar.getCalendarPermissionsAsync();
-      const calGranted = cal.status === 'granted';
 
       // Verificar permisos nativos
       let backgroundGranted = permissionsState.background; 
@@ -72,7 +69,6 @@ export default function Bienvenida({ onContinue }) {
       setPermissionsState(prev => ({ 
         ...prev, 
         notifications: notifGranted, 
-        calendar: calGranted, 
         // Mantenemos el estado previo si era true, o el nuevo valor
         background: prev.background || backgroundGranted, 
         exactAlarm: exactAlarmGranted,
@@ -80,7 +76,6 @@ export default function Bienvenida({ onContinue }) {
       setPermissionsStatus(prev => ({ 
         ...prev, 
         notifications: notifStatus, 
-        calendar: cal.status,
         background: null 
       }));
     } catch (e) {
@@ -127,38 +122,16 @@ export default function Bienvenida({ onContinue }) {
 
       setPermissionsState((prev) => ({ ...prev, notifications: granted }));
       setPermissionsStatus((prev) => ({ ...prev, notifications: status }));
+
+      // Registrar push token en Supabase al otorgar el permiso
+      if (granted) {
+        registerAndSavePushToken().catch(() => {});
+      }
       
       return granted;
     } catch (error) {
       console.log('Notification permission error:', error);
       return false;
-    }
-  };
-
-  const requestCalendarPermissions = async () => {
-    try {
-      const { status } = await Calendar.requestCalendarPermissionsAsync();
-      const granted = status === 'granted';
-      setPermissionsState((prev) => ({
-        ...prev,
-        calendar: granted,
-      }));
-      setPermissionsStatus((prev) => ({ ...prev, calendar: status }));
-      if (granted && Platform.OS === 'ios') {
-        try {
-          await Calendar.requestRemindersPermissionsAsync();
-        } catch (e) {
-          console.log('Reminder permission error:', e);
-        }
-      }
-      return granted;
-    } catch (error) {
-      console.log('Calendar permission error:', error);
-      setPermissionsState((prev) => ({
-        ...prev,
-        calendar: true,
-      }));
-      return true;
     }
   };
 
@@ -183,6 +156,22 @@ export default function Bienvenida({ onContinue }) {
               console.warn("Exact alarm permission error", e);
           }
       }
+  };
+
+  const requestFullscreenPermission = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        await IntentLauncher.startActivityAsync(
+          'android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENT',
+          { data: 'package:' + Application.applicationId }
+        );
+      } catch (e) {
+        // Fallback: abrir ajustes de la app
+        await Linking.openSettings();
+      }
+      setPermissionsState((prev) => ({ ...prev, fullscreen: true }));
+      setPermissionsStatus((prev) => ({ ...prev, fullscreen: 'granted' }));
+    }
   };
 
   const confirmBackgroundPermission = () => {
@@ -215,11 +204,18 @@ export default function Bienvenida({ onContinue }) {
   useEffect(() => {
     setAllGranted(
         permissionsState.notifications && 
-        permissionsState.calendar && 
         permissionsState.background && 
         permissionsState.camera
     );
   }, [permissionsState]);
+
+  // Verificar si permiso fullscreen ya estaba activo al volver de ajustes
+  useEffect(() => {
+    if (Platform.OS === 'android' && Platform.Version >= 34) {
+      // En Android 14+ el permiso USE_FULL_SCREEN_INTENT requiere aprobación manual
+      // Lo marcamos como revisado si el usuario ya pasó por ajustes
+    }
+  }, []);
 
   const handleContinue = () => {
     if (allGranted) {
@@ -302,6 +298,35 @@ export default function Bienvenida({ onContinue }) {
             </>
             )}
 
+            {/* NOTIFICACIÓN PANTALLA COMPLETA (Android 14+) */}
+            {Platform.OS === 'android' && Platform.Version >= 34 && (
+            <>
+                <View style={styles.permissionItem}>
+                    <View style={styles.permissionLeft}>
+                        <View style={[styles.permissionIcon, permissionsState.fullscreen && styles.permissionIconActive]}>
+                            <Ionicons
+                                name={permissionsState.fullscreen ? 'expand' : 'expand-outline'}
+                                size={24}
+                                color={permissionsState.fullscreen ? '#fff' : '#A5B4FC'}
+                            />
+                        </View>
+                        <View style={styles.permissionText}>
+                            <Text style={styles.permissionTitle}>Alarma en pantalla completa</Text>
+                            <Text style={styles.permissionSubtitle}>Alertas visibles con pantalla bloqueada</Text>
+                        </View>
+                    </View>
+                    {!permissionsState.fullscreen ? (
+                        <TouchableOpacity style={styles.permissionButton} onPress={requestFullscreenPermission}>
+                            <Text style={styles.buttonText}>Activar</Text>
+                        </TouchableOpacity>
+                    ) : (
+                        <Ionicons name="checkmark-circle" size={32} color="#4ADE80" />
+                    )}
+                </View>
+                <View style={styles.divider} />
+            </>
+            )}
+
             {/* NOTIFICATIONS PERMISSION */}
             <View style={styles.permissionItem}>
               <View style={styles.permissionLeft}>
@@ -326,46 +351,6 @@ export default function Bienvenida({ onContinue }) {
                 <TouchableOpacity style={styles.permissionButton} onPress={requestNotificationPermissions}>
                   <Text style={styles.buttonText}>Activar</Text>
                 </TouchableOpacity>
-              ) : (
-                <Ionicons name="checkmark-circle" size={32} color="#4ADE80" />
-              )}
-            </View>
-
-            <View style={styles.divider} />
-
-            <View style={styles.permissionItem}>
-              <View style={styles.permissionLeft}>
-                <View
-                  style={[
-                    styles.permissionIcon,
-                    permissionsState.calendar && styles.permissionIconActive,
-                  ]}
-                >
-                  <Ionicons
-                    name={permissionsState.calendar ? 'calendar' : 'calendar-outline'}
-                    size={24}
-                    color={permissionsState.calendar ? '#fff' : '#A5B4FC'}
-                  />
-                </View>
-                <View style={styles.permissionText}>
-                  <Text style={styles.permissionTitle}>Calendario</Text>
-                  <Text style={styles.permissionSubtitle}>Sincronización de citas</Text>
-                </View>
-              </View>
-              {!permissionsState.calendar ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <TouchableOpacity style={[styles.permissionButton, { marginRight: 8 }]} onPress={requestCalendarPermissions}>
-                    <Text style={styles.buttonText}>Activar</Text>
-                  </TouchableOpacity>
-                  {permissionsStatus.calendar === 'denied' && (
-                    <TouchableOpacity
-                      style={[styles.permissionButton, { backgroundColor: '#475569' }]}
-                      onPress={() => Linking.openSettings()}
-                    >
-                      <Text style={[styles.buttonText, { color: '#F8FAFC' }]}>Abrir ajustes</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
               ) : (
                 <Ionicons name="checkmark-circle" size={32} color="#4ADE80" />
               )}
@@ -495,6 +480,13 @@ export default function Bienvenida({ onContinue }) {
               <View style={styles.modalInfoRow}>
                 <Ionicons name="shield-checkmark" size={24} color="#4ADE80" />
                 <Text style={styles.modalInfoText}>Es necesario para tu salud y seguridad</Text>
+              </View>
+
+              <View style={[styles.modalInfoRow, { backgroundColor: 'rgba(251,191,36,0.12)', borderRadius: 10, padding: 8, marginTop: 4 }]}>
+                <Ionicons name="warning" size={24} color="#FBBF24" />
+                <Text style={[styles.modalInfoText, { color: '#FBBF24', fontWeight: '700' }]}>
+                   No actives el ahorro de batería para esta app, puede retrasar o bloquear todas las notificaciones y alarmas
+                </Text>
               </View>
             </View>
 

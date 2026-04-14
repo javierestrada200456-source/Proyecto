@@ -6,8 +6,30 @@ import { notifyCaregivers } from '../../../services/CaregiverNotifications';
 
 const { AlarmModule } = NativeModules;
 const STORAGE_LAST_TAKEN_KEY = '@app_medicamentos_last_taken';
+const DOSE_HISTORY_KEY = '@dose_history';
 const CHANNEL_ALARM = 'medication-alarms';
 const CHANNEL_ALARM_LEGACY = 'alarm_channel';
+
+const getDoseLabel = (doseIndex) => {
+  const labels = ['Primera dosis', 'Segunda dosis', 'Tercera dosis'];
+  const idx = parseInt(doseIndex, 10);
+  return labels[idx] ?? 'Primera dosis';
+};
+
+const saveToHistory = async (data, takenAt) => {
+  try {
+    const stored = await AsyncStorage.getItem(DOSE_HISTORY_KEY);
+    const history = stored ? JSON.parse(stored) : [];
+    history.unshift({
+      id: takenAt.toString(),
+      medName: data?.medName || 'Medicamento',
+      doseLabel: getDoseLabel(data?.doseIndex),
+      scheduledTime: data?.alarmTimestamp || null,
+      takenAt,
+    });
+    await AsyncStorage.setItem(DOSE_HISTORY_KEY, JSON.stringify(history));
+  } catch (_e) { /* noop */ }
+};
 
 let notifeeInstance;
 try {
@@ -49,6 +71,20 @@ export default function AlarmOverlay() {
 
     if (!isAlarm) return;
 
+    // Verificar si esta alarma ya fue aceptada (desde notificación push o pantalla bloqueada)
+    const alarmId = notification?.data?.id || notification?.data?.alarmId;
+    if (alarmId) {
+      try {
+        const stored = await AsyncStorage.getItem(STORAGE_LAST_TAKEN_KEY);
+        const map = stored ? JSON.parse(stored) : {};
+        if (map[alarmId]) {
+          // Ya fue aceptada — cancelar notificación si aún está visible y no mostrar AlarmScreen
+          try { if (notifeeInstance) await notifeeInstance.cancelNotification(notification.id); } catch (_e) {}
+          return;
+        }
+      } catch (_e) { /* noop */ }
+    }
+
     // Determinar si el teléfono está bloqueado/pantalla apagada
     let isLocked = forceShow; // Si vinimos de una pulsación, asumir "quiere AlarmScreen"
     if (!forceShow && AlarmModule?.isLocked) {
@@ -76,7 +112,6 @@ export default function AlarmOverlay() {
     setAlarmVisible(true);
 
     // Resetear el registro de "última toma" para que el contador reinicie
-    const alarmId = notification.data?.id || notification.data?.alarmId;
     if (alarmId) {
       try {
         const stored = await AsyncStorage.getItem(STORAGE_LAST_TAKEN_KEY);
@@ -99,14 +134,16 @@ export default function AlarmOverlay() {
 
     // Guardar timestamp de "Tomado"
     const alarmId = notification.data?.id || notification.data?.alarmId;
+    const takenAt = Date.now();
     if (alarmId) {
       try {
         const stored = await AsyncStorage.getItem(STORAGE_LAST_TAKEN_KEY);
         const map = stored ? JSON.parse(stored) : {};
-        map[alarmId] = Date.now();
+        map[alarmId] = takenAt;
         await AsyncStorage.setItem(STORAGE_LAST_TAKEN_KEY, JSON.stringify(map));
       } catch (_e) { /* noop */ }
     }
+    await saveToHistory(notification.data, takenAt);
 
     // Notificar al cuidador que el paciente aceptó la dosis desde el banner
     try {
@@ -243,16 +280,18 @@ export default function AlarmOverlay() {
         await notifeeInstance.cancelNotification(alarmData.notificationId);
     }
     
+    const takenAt = Date.now();
     // Guardar timestamp de "Tomado"
     const alarmId = alarmData?.id || alarmData?.alarmId;
     if (alarmId) {
         try {
             const stored = await AsyncStorage.getItem(STORAGE_LAST_TAKEN_KEY);
             const map = stored ? JSON.parse(stored) : {};
-            map[alarmId] = Date.now();
+            map[alarmId] = takenAt;
             await AsyncStorage.setItem(STORAGE_LAST_TAKEN_KEY, JSON.stringify(map));
         } catch(e) { console.log("Error saving last taken", e); }
     }
+    await saveToHistory(alarmData, takenAt);
 
     setAlarmVisible(false);
   };

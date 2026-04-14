@@ -114,6 +114,13 @@ const Register = () => {
         }
         formRef.current?.shake(800);
       } else {
+        // Guardar nombre en profiles para que el cuidador lo vea desde el inicio
+        if (data?.user) {
+          try {
+            const cleanName = formData.username.trim();
+            await authService.upsertProfile({ name: cleanName, full_name: cleanName });
+          } catch (_e) { /* no bloquear el flujo si falla */ }
+        }
         // Guardamos un flag indicando que el usuario debe confirmar su correo.
         await AsyncStorage.setItem('awaitingConfirmation', 'true');
         // Marcar que es un usuario nuevo y necesita completar info

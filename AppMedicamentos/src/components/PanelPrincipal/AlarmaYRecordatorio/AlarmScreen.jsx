@@ -6,6 +6,38 @@ import * as Animatable from 'react-native-animatable';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import { notifyCaregivers } from '../../../services/CaregiverNotifications';
+import { limpiarMedicamento } from './AlarmaYRecordatorio';
+
+// Devuelve nombre limpio + concentración a partir de los datos de alarma
+// Maneja compatibilidad con datos viejos donde medName era el nombre completo en mayúsculas
+function buildDisplayName(medName, medStrength, medStrengthUnit) {
+  const rawName = (medName || '').trim();
+  let displayName = rawName;
+  let displayStrength = [medStrength, medStrengthUnit].filter(Boolean).join(' ');
+
+  // Si el nombre parece ser el nombre completo de la API (mayúsculas o incluye forma farmacéutica)
+  if (rawName && (rawName === rawName.toUpperCase() || /TABLETA|CAPSULA|SOLUCION|COMPRIMIDO/i.test(rawName))) {
+    const parsed = limpiarMedicamento(rawName);
+    displayName = parsed.nombre || rawName;
+    // Si no hay concentración explícita, usar la parseada del nombre
+    if (!displayStrength) {
+      displayStrength = parsed.concentracion || '';
+    }
+  }
+  return { displayName, displayStrength };
+}
+
+// Devuelve la forma base (primera palabra) en singular o plural
+function buildFormaBase(medType, qty) {
+  if (!medType) return '';
+  const base = medType.trim().split(/\s+/)[0].toLowerCase();
+  const n = parseInt(qty, 10);
+  const capitalized = base.charAt(0).toUpperCase() + base.slice(1);
+  if (isNaN(n) || n === 1) return capitalized;
+  if (/ción$/i.test(base)) return base.replace(/ción$/i, 'ciones').charAt(0).toUpperCase() + base.replace(/ción$/i, 'ciones').slice(1);
+  if (/[aeiouáéíóú]$/i.test(base)) return capitalized + 's';
+  return capitalized + 'es';
+}
 
 const { AlarmModule } = NativeModules;
 
@@ -130,9 +162,23 @@ export default function AlarmScreen({ visible, data, onDismiss, onSnooze, onAcce
   };
 
   const sendCaregiverNotification = async (medData) => {
-      // TODO: Implementar llamada real a backend o notificación local
-      console.log("Enviando notificación al cuidador sobre toma de:", medData.medName);
-      // Ejemplo: supabase.rpc('notify_caregiver', { ... })
+    try {
+      const qty = medData.quantityToTake || '';
+      const qtyNum = parseInt(qty, 10);
+      const formaLabel = buildFormaBase(medData.medType, qtyNum);
+      const DOSE_LABELS = ['Primera', 'Segunda', 'Tercera'];
+      const idx = medData.doseIndex !== undefined ? Number(medData.doseIndex) : 0;
+      const doseLabel = DOSE_LABELS[idx] ? `${DOSE_LABELS[idx]} dosis` : `Dosis ${idx + 1}`;
+      const { displayName, displayStrength } = buildDisplayName(medData.medName, medData.medStrength, medData.medStrengthUnit);
+      const medLine = [displayName, displayStrength].filter(Boolean).join(' ');
+
+      const titleTemplate = '💊 [Nombre del paciente] tomó su medicamento';
+      const bodyTemplate = `${medLine} — ${doseLabel}${qty && !isNaN(qtyNum) ? `\nCantidad: ${qty}${formaLabel ? ' ' + formaLabel : ''}` : ''}`;
+
+      await notifyCaregivers(titleTemplate, bodyTemplate, { medName: displayName });
+    } catch (e) {
+      console.log('[AlarmScreen] Error notificando a cuidador:', e);
+    }
   };
 
   if (stage === 'success') {
@@ -183,23 +229,31 @@ export default function AlarmScreen({ visible, data, onDismiss, onSnooze, onAcce
 
         <View style={styles.infoContainer}>
           <Text style={styles.actionText}>Es hora de tomar:</Text>
-          <Text style={styles.medName}>{medName}</Text>
-          {/* Dosis: Primera / Segunda / Tercera */}
+          {/* Nombre / concentración */}
           {(() => {
-            const DOSE_LABELS = ['Primera dosis', 'Segunda dosis', 'Tercera dosis'];
-            const idx = data.doseIndex !== undefined && data.doseIndex !== null ? Number(data.doseIndex) : -1;
-            const doseLabel = idx >= 0 ? (DOSE_LABELS[idx] || `Dosis ${idx + 1}`) : null;
-            return doseLabel ? (
-              <Text style={styles.medDetails}>Dosis: {doseLabel}</Text>
-            ) : (
-              <Text style={styles.medDetails}>{medInfo}</Text>
+            const DOSE_LABELS = ['Primera', 'Segunda', 'Tercera'];
+            const idx = data.doseIndex !== undefined && data.doseIndex !== null ? Number(data.doseIndex) : 0;
+            const doseLabel = DOSE_LABELS[idx] ? `${DOSE_LABELS[idx]} dosis` : `Dosis ${idx + 1}`;
+            const { displayName, displayStrength } = buildDisplayName(data.medName, data.medStrength, data.medStrengthUnit);
+            const nameLine = [displayName, displayStrength].filter(Boolean).join(' ');
+            return (
+              <>
+                <Text style={styles.medName}>{nameLine}</Text>
+                <Text style={[styles.medDetails, { color: '#a5b4fc', marginTop: 2 }]}>{doseLabel}</Text>
+              </>
             );
           })()}
-          {(!!data.medStrength || !!data.quantityToTake) && (
-           <Text style={[styles.medDetails, { marginTop: 8, fontWeight: 'bold', fontSize: 22, color: '#4facfe' }]}>
-            Tomar: {data.quantityToTake || data.medStrength} {data.medType || data.medStrengthUnit || ''}
-           </Text>
-          )}
+          {/* Cantidad a tomar */}
+          {!!data.quantityToTake && (() => {
+            const qty = data.quantityToTake;
+            const n = parseInt(qty, 10);
+            const tipoLabel = buildFormaBase(data.medType, n);
+            return (
+              <Text style={[styles.medDetails, { marginTop: 10, fontWeight: 'bold', fontSize: 22, color: '#4facfe' }]}>
+                Cantidad a tomar: {qty}{tipoLabel ? ' ' + tipoLabel : ''}
+              </Text>
+            );
+          })()}
         </View>
 
         <View style={styles.buttonContainer}>

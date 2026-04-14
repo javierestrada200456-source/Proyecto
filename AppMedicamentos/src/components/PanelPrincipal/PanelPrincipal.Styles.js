@@ -174,17 +174,11 @@ const PanelPrincipalStyles = StyleSheet.create({
     gap: isSmall ? 12 : 14,
   },
   menuCard: {
-    // OJO: el wrapper en PanelPrincipal.jsx ya mide 48%,
-    // aquí la card debe ocupar el 100% para no verse pequeña.
+    // Shadow está en el wrapper Animatable.View para evitar el gris de Android
     width: '100%',
     borderRadius: 22,
     overflow: 'hidden',
     borderWidth: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.25,
-    shadowRadius: 14,
-    elevation: 12,
     aspectRatio: 1.05,
     minHeight: isSmall ? 140 : 160,
   },
@@ -194,6 +188,8 @@ const PanelPrincipalStyles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     backgroundColor: '#fff',
+    borderRadius: 19,
+    overflow: 'hidden',
   },
   iconContainer: {
     width: isSmall ? 56 : isMedium ? 64 : 70,

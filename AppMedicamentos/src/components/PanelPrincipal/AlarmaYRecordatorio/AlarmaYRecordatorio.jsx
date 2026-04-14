@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View,  Text, TouchableOpacity, ScrollView, Modal, TextInput,Alert,Animated,Pressable, Platform, Vibration, Dimensions, Switch, KeyboardAvoidingView} from 'react-native';
+import { View,  Text, TouchableOpacity, ScrollView, Modal, TextInput, Alert, Animated, Pressable, Platform, Vibration, Dimensions, Switch, KeyboardAvoidingView, FlatList, ActivityIndicator } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Animatable from 'react-native-animatable';
@@ -18,6 +18,7 @@ import { useTheme } from '../../../context/ThemeContext';
 
 import { authService, supabase } from '../../../services/supabaseClient';
 import { notifyCaregivers } from '../../../services/CaregiverNotifications';
+import TimePickerModal from './TimePickerModal';
 
 let Notifications;
 try {
@@ -75,6 +76,149 @@ const AlarmToggle = ({ value, disabled, onChange }) => (
   />
 );
 
+// ─── Helpers pluralización ───────────────────────────────────────────────────
+function pluralizeType(type) {
+  if (!type) return '';
+  const t = type.trim();
+  if (/ción$/i.test(t)) return t.replace(/ción$/i, 'ciones');
+  if (/[aeiouáéíóú]$/i.test(t)) return t + 's';
+  return t + 's';
+}
+function isMasculine(type) {
+  const lower = (type || '').toLowerCase();
+  return lower === 'comprimido' || lower === 'jarabe';
+}
+const DOSE_ORDINALS_ES = ['primera', 'segunda', 'tercera'];
+
+/**
+ * Genera la pregunta de cantidad para el paso 5 según la forma farmacéutica.
+ * @param {string} forma - forma farmacéutica (ej: "Tableta recubierta", "Jarabe", etc.)
+ * @param {string} concentracion - concentración (ej: "5 ml", "500 mg")
+ * @param {string} ordinal - "primera" | "segunda" | "tercera"
+ */
+function getQuestionDosis(forma, concentracion, ordinal) {
+  const f = (forma || '').toLowerCase().trim();
+  const base = f.split(' ')[0]; // primer término
+
+  // Gotas
+  if (f.includes('gota') || f.includes('oftalmico') || f.includes('ofélmico')) {
+    return `¿Cuántas gotas te pones en tu ${ordinal} dosis?`;
+  }
+  // Parche
+  if (f.includes('parche')) {
+    return `¿Cuántos parches te pones en tu ${ordinal} dosis?`;
+  }
+  // Supositorios / óvulos
+  if (f.includes('supositorio')) return `¿Cuántos supositorios usas en tu ${ordinal} dosis?`;
+  if (f.includes('óvulo') || f.includes('ovulo')) return `¿Cuántos óvulos usas en tu ${ordinal} dosis?`;
+  // Inyectables
+  if (f.includes('inyec') || f.includes('ampolla') || f.includes('vial')) {
+    return `¿Cuántas inyecciones te aplicas en tu ${ordinal} dosis?`;
+  }
+  // Líquidos orales (jarabe, solución, suspensión, elixir)
+  if (f.includes('jarabe') || f.includes('solución') || f.includes('solucion') ||
+      f.includes('suspensión') || f.includes('suspension') || f.includes('elixir') ||
+      f.includes('emulsión') || f.includes('emulsion')) {
+    // Si la concentración indica volumen ≪ 2.5 ml → cucharadita(s)
+    const mlMatch = (concentracion || '').match(/(\d+(?:[.,]\d+)?)\s*ml/i);
+    const ml = mlMatch ? parseFloat(mlMatch[1].replace(',', '.')) : 5;
+    const cuchara = ml <= 2.5 ? 'cucharaditas' : 'cucharadas';
+    return `¿Cuántas ${cuchara} tomas en tu ${ordinal} dosis?`;
+  }
+  // Aerosol / inhalador
+  if (f.includes('aerosol') || f.includes('inhalador') || f.includes('spray') || f.includes('inhaler')) {
+    return `¿Cuántas inhalaciones haces en tu ${ordinal} dosis?`;
+  }
+  // Sobres / sachets
+  if (f.includes('sobre') || f.includes('sachet') || f.includes('polvo')) {
+    return `¿Cuántos sobres tomas en tu ${ordinal} dosis?`;
+  }
+  // Cápsulas
+  if (base === 'cápsula' || base === 'capsula') {
+    return `¿Cuántas cápsulas tomas en tu ${ordinal} dosis?`;
+  }
+  // Comprimidos
+  if (base === 'comprimido') return `¿Cuántos comprimidos tomas en tu ${ordinal} dosis?`;
+  // Default: tableta u otra forma
+  if (!f) return `¿Cuántas unidades tomas en tu ${ordinal} dosis?`;
+  const plural = pluralizeType(base);
+  const masc = isMasculine(base);
+  return `${masc ? '¿Cuántos' : '¿Cuántas'} ${plural} tomas en tu ${ordinal} dosis?`;
+}
+
+// ─── Utilidad: parsea un string sucio del INVIMA ─────────────────────────────
+/**
+ * limpiarMedicamento('LOSARTAN POTASICO 50 MG TABLETA RECUBIERTA')
+ * → { nombre: 'Losartan potasico', concentracion: '50 mg', forma: 'Tableta recubierta' }
+ */
+export function limpiarMedicamento(raw) {
+  if (!raw || typeof raw !== 'string') return { nombre: '', concentracion: '', forma: '' };
+
+  // 1. Elimina caracteres sucios: comillas, puntos múltiples, guiones bajos
+  let texto = raw
+    .replace(/["""''`]/g, '')
+    .replace(/\.{2,}/g, ' ')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // 2. Extrae concentración: número + unidad (soporta fracciones p.ej. 100/50 MG)
+  const RE_CONC =
+    /(\d+(?:[,.]?\d+)?(?:\s*\/\s*\d+(?:[,.]?\d+)?)?\s*(?:mg|mcg|ml|g(?!\w)|ui|iu|meq|meg|%))/gi;
+  const matchConc = texto.match(RE_CONC);
+  const concentracion = matchConc ? matchConc[0].replace(/\s+/g, ' ').toLowerCase().trim() : '';
+  let sinConc = texto.replace(RE_CONC, ' ').replace(/\s+/g, ' ').trim();
+
+  // 3. Extrae la forma farmacéutica (orden descendente por longitud para preferir el match más largo)
+  const FORMAS = [
+    'tableta de liberacion prolongada', 'tableta de liberación prolongada',
+    'tableta efervescente', 'tableta masticable', 'tableta dispersable',
+    'tableta recubierta', 'tableta sublingual', 'tableta',
+    'capsula de liberacion prolongada', 'cápsula de liberación prolongada',
+    'capsula dura', 'capsula blanda', 'cápsula dura', 'cápsula blanda',
+    'capsula', 'cápsula',
+    'polvo para reconstituir', 'polvo para suspension', 'polvo para solución',
+    'polvo para inyeccion', 'polvo', 'solucion inyectable', 'solución inyectable',
+    'solucion oral', 'solución oral', 'solucion oftalmica', 'solución oftálmica',
+    'solucion', 'solución', 'suspension oral', 'suspensión oral',
+    'suspension', 'suspensión', 'parche transdermico', 'parche transdérmico',
+    'parche', 'supositorio', 'ovulo', 'óvulo', 'ampolla', 'vial',
+    'inyectable', 'gotas', 'aerosol', 'spray', 'inhalador', 'inhaler',
+    'emulsion', 'emulsión', 'locion', 'loción', 'crema', 'ungüento',
+    'unguento', 'pomada', 'gel', 'jarabe', 'elixir', 'shampoo', 'champu',
+  ].sort((a, b) => b.length - a.length);
+
+  // Normaliza acentos solo para comparar (no modifica el string original)
+  const stripAccents = (s) =>
+    s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+  const textoNorm = stripAccents(sinConc);
+  let forma = '';
+  for (const f of FORMAS) {
+    const idx = textoNorm.indexOf(stripAccents(f));
+    if (idx !== -1) {
+      forma = sinConc.substring(idx, idx + f.length); // preserva el texto original
+      sinConc = (sinConc.slice(0, idx) + sinConc.slice(idx + f.length))
+        .replace(/\s+/g, ' ')
+        .trim();
+      break;
+    }
+  }
+
+  // 4. Sentence case: primera letra mayúscula, resto minúsculas
+  const sentenceCase = (s) => {
+    const lower = s.toLowerCase();
+    return lower.charAt(0).toUpperCase() + lower.slice(1);
+  };
+
+  return {
+    nombre: sinConc ? sentenceCase(sinConc) : '',
+    concentracion,
+    forma: forma ? sentenceCase(forma) : '',
+  };
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function AlarmaYRecordatorio() {
   const insets = useSafeAreaInsets();
   const { isDark, theme } = useTheme();
@@ -87,6 +231,8 @@ export default function AlarmaYRecordatorio() {
   const [formErrors, setFormErrors] = useState({});
   const [medTypePickerVisible, setMedTypePickerVisible] = useState(false);
   const [unitPickerVisible, setUnitPickerVisible] = useState(false); // Nuevo estado para unidades
+  const [reminderPickerVisible, setReminderPickerVisible] = useState(false);
+  const [quantityPickerVisible, setQuantityPickerVisible] = useState(false);
   
   // Custom Time Picker — Primera dosis
   const [timeDraft, setTimeDraft] = useState({ hourText: '12', minuteText: '00' });
@@ -104,8 +250,12 @@ export default function AlarmaYRecordatorio() {
   const dose3MinuteRef = useRef(null);
   const [showSecondDose, setShowSecondDose] = useState(false);
   const [showThirdDose, setShowThirdDose] = useState(false);
+
+  // Modal del wheel picker (null = cerrado, 1/2/3 = dosis activa)
+  const [activeTimePicker, setActiveTimePicker] = useState(null);
   const [toast, setToast] = useState(null);
   const toastRef = useRef(null);
+  const searchTimeoutRef = useRef(null);
 
   const [newAlarm, setNewAlarm] = useState({
     id: null,
@@ -114,6 +264,7 @@ export default function AlarmaYRecordatorio() {
     medStrength: '',
     medStrengthUnit: 'mg',
     quantityToTake: '',
+    quantityPerDose: ['', '', ''],
     days: [],
     time: new Date(),
     active: true,
@@ -144,6 +295,16 @@ export default function AlarmaYRecordatorio() {
   const [togglingById, setTogglingById] = useState({});
   const [externalSyncActive, setExternalSyncActive] = useState(false);
   const [lastTakenMap, setLastTakenMap] = useState({});
+
+  // Wizard states
+  const [wizardStep, setWizardStep] = useState(1);
+  const [medSearchQuery, setMedSearchQuery] = useState('');
+  const [medSearchResults, setMedSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [selectedMedInfo, setSelectedMedInfo] = useState(null); // { nombre, forma, concentracion }
+  const [manualMedModalVisible, setManualMedModalVisible] = useState(false);
+  const [manualMed, setManualMed] = useState({ nombre: '', forma: '', concentracion: '' });
+  const WIZARD_TOTAL_STEPS = 5;
 
   // Layout constants derived from insets
   const tabBarBottom = insets.bottom > 0 ? insets.bottom + 10 : 20;
@@ -514,11 +675,13 @@ export default function AlarmaYRecordatorio() {
           med_strength: alarm.medStrength,
           med_strength_unit: alarm.medStrengthUnit || '',
           med_type: alarm.medType,
-          quantity_to_take: alarm.quantityToTake || alarm.medStrength || '1',
+          quantity_to_take: alarm.quantityPerDose?.[0] || alarm.quantityToTake || alarm.medStrength || '1',
           active: alarm.active,
           frequency_hours: alarm.frequencyHours || 0,
           time: timeStr,
-          times: Array.isArray(alarm.times) ? alarm.times : [],
+          times: Array.isArray(alarm.times)
+            ? alarm.times.map((t, i) => ({ ...t, qty: alarm.quantityPerDose?.[i] || '' }))
+            : [],
           days: Array.isArray(alarm.days) ? alarm.days : [],
           scheduled_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -570,6 +733,14 @@ export default function AlarmaYRecordatorio() {
       const d2m = parseInt(dose2Draft.minuteText, 10);
       if (!Number.isFinite(d2h) || d2h < 1 || d2h > 12 || !Number.isFinite(d2m) || d2m < 0 || d2m > 59) {
         nextErrors.dose2Time = 'Ingresa una hora válida para la segunda dosis.';
+      }
+    }
+
+    if (showThirdDose) {
+      const d3h = parseInt(dose3Draft.hourText, 10);
+      const d3m = parseInt(dose3Draft.minuteText, 10);
+      if (!Number.isFinite(d3h) || d3h < 1 || d3h > 12 || !Number.isFinite(d3m) || d3m < 0 || d3m > 59) {
+        nextErrors.dose3Time = 'Ingresa una hora válida para la tercera dosis.';
       }
     }
 
@@ -755,11 +926,21 @@ export default function AlarmaYRecordatorio() {
         saveVisibleReminders(newVisibleIds);
 
         // Notificar a cuidadores conectados
-        notifyCaregivers(
-          '🆕 Nuevo recordatorio',
-          '[Nombre del paciente] acaba de añadir un nuevo recordatorio de [Nombre del medicamento]',
-          { medName: alarmDataToSchedule.medName }
-        ).catch(() => {});
+        {
+          const a = alarmDataToSchedule;
+          const strength = [a.medStrength, a.medStrengthUnit].filter(Boolean).join(' ');
+          const cleanName = limpiarMedicamento(a.medName || '').nombre || a.medName;
+          const medLine = [cleanName, strength].filter(Boolean).join(' ');
+          const formaBase = (a.medType || '').trim().split(/\s+/)[0];
+          const daysStr = Array.isArray(a.days) && a.days.length > 0
+            ? a.days.join(', ')
+            : 'todos los días';
+          notifyCaregivers(
+            '🆕 Nuevo recordatorio de [Nombre de paciente]',
+            `Medicamento: ${medLine}${formaBase ? ` (${formaBase})` : ''}\nDías: ${daysStr}`,
+            { medName: cleanName }
+          ).catch(() => {});
+        }
 
         showToast({
           type: 'success',
@@ -785,6 +966,21 @@ export default function AlarmaYRecordatorio() {
       if (blockIfExternalSync()) return;
       setAlarmToDeleteId(id);
       setDeleteModalVisible(true);
+  };
+
+  // Confirmar selección del wheel picker de tiempo
+  const handleTimePickerConfirm = ({ hourText, minuteText, period: p }) => {
+    if (activeTimePicker === 1) {
+      setTimeDraft({ hourText, minuteText });
+      setPeriod(p);
+    } else if (activeTimePicker === 2) {
+      setDose2Draft({ hourText, minuteText });
+      setDose2Period(p);
+    } else if (activeTimePicker === 3) {
+      setDose3Draft({ hourText, minuteText });
+      setDose3Period(p);
+    }
+    setActiveTimePicker(null);
   };
 
   const confirmDeleteAlarm = async () => {
@@ -927,6 +1123,7 @@ export default function AlarmaYRecordatorio() {
       medStrength: alarm.medStrength || '',
       medStrengthUnit: alarm.medStrengthUnit || 'mg',
       quantityToTake: alarm.quantityToTake || '',
+      quantityPerDose: Array.isArray(alarm.quantityPerDose) ? alarm.quantityPerDose : [alarm.quantityToTake || '', '', ''],
       dosage: alarm.dosage,
       medType: alarm.medType,
       frequencyHours: alarm.frequencyHours,
@@ -1089,7 +1286,7 @@ export default function AlarmaYRecordatorio() {
       setIsPlayingPreview(false);
     }
 
-    setNewAlarm({ medName: '', medStrength: '', dosage: '', medType: '', medStrengthUnit: 'mg', quantityToTake: '', frequencyHours: '8', days: [], hour: 12, minute: 0, reminderMinutes: 5, soundUri: null, soundVolume: 1.0, soundStartSeconds: 0 });
+    setNewAlarm({ medName: '', medStrength: '', dosage: '', medType: '', medStrengthUnit: 'mg', quantityToTake: '', quantityPerDose: ['', '', ''], frequencyHours: '8', days: [], hour: 12, minute: 0, reminderMinutes: 5, soundUri: null, soundVolume: 1.0, soundStartSeconds: 0 });
     setPeriod('AM');
     setTimeDraft({ hourText: '12', minuteText: '00' });
     setDose2Draft({ hourText: '12', minuteText: '00' });
@@ -1101,6 +1298,12 @@ export default function AlarmaYRecordatorio() {
     setEditingAlarmId(null);
     setFormErrors({});
     setMedTypePickerVisible(false);
+    setWizardStep(1);
+    setMedSearchQuery('');
+    setMedSearchResults([]);
+    setSelectedMedInfo(null);
+    setManualMed({ nombre: '', forma: '', concentracion: '' });
+    setManualMedModalVisible(false);
   };
 
   const pickAudio = async () => {
@@ -1278,6 +1481,119 @@ export default function AlarmaYRecordatorio() {
 
   const saveButtonLabel = editingAlarmId ? 'Actualizar alarma' : 'Guardar y Programar';
 
+  // ─── Búsqueda de medicamentos ────────────────────────────────────────────
+  const searchMedications = async (query) => {
+    if (!query || query.trim().length < 2) {
+      setMedSearchResults([]);
+      return;
+    }
+    setIsSearching(true);
+    try {
+      const q = query.trim().toUpperCase();
+      // Busca solo en el campo "producto" (más rápido que full-text $q)
+      // Solo trae los campos que necesitamos y ordena A-Z
+      const encoded = encodeURIComponent(q);
+      const url =
+        `https://www.datos.gov.co/resource/qj5z-zabx.json` +
+        `?$select=producto,principioactivo,formafarmaceutica,cantidad,unidadmedida` +
+        `&$where=upper(producto) like upper('%25${encoded}%25')` +
+        `&$order=producto ASC` +
+        `&$limit=40`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!Array.isArray(data)) { setMedSearchResults([]); return; }
+
+      // Deduplicar por nombre de producto
+      const seen = new Set();
+      const unique = [];
+      for (const item of data) {
+        const name = (item.producto || '').trim();
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        unique.push(item);
+      }
+      setMedSearchResults(unique.slice(0, 20));
+    } catch (e) {
+      setMedSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const getMedDisplayName = (item) =>
+    (item.producto || '').trim() || 'Medicamento';
+
+  /** Devuelve "Tableta · 500 mg" o "Cápsula · 10 mcg", omitiendo partes vacías */
+  const getMedDetail = (item) => {
+    const parts = [];
+    if (item.formafarmaceutica) parts.push(item.formafarmaceutica.trim());
+    if (item.cantidad && item.unidadmedida) {
+      parts.push(`${item.cantidad.trim()} ${item.unidadmedida.trim()}`);
+    } else if (item.cantidad) {
+      parts.push(item.cantidad.trim());
+    } else if (item.principioactivo) {
+      parts.push(item.principioactivo.trim());
+    }
+    return parts.join(' · ');
+  };
+
+  // ─── Wizard navigation ───────────────────────────────────────────────────
+  const handleWizardNext = () => {
+    const errors = {};
+    if (wizardStep === 1) {
+      if (!newAlarm.medName || !newAlarm.medName.trim()) {
+        errors.medName = 'Escribe o selecciona el nombre del medicamento.';
+      }
+    }
+    if (wizardStep === 2) {
+      if (!newAlarm.days || newAlarm.days.length === 0) {
+        errors.days = 'Selecciona al menos un día.';
+      }
+    }
+    if (wizardStep === 4) {
+      const h = parseInt(timeDraft.hourText, 10);
+      const m = parseInt(timeDraft.minuteText, 10);
+      if (!Number.isFinite(h) || h < 1 || h > 12 || !Number.isFinite(m) || m < 0 || m > 59) {
+        errors.time = 'Ingresa una hora válida para la primera dosis.';
+      }
+      if (showSecondDose) {
+        const d2h = parseInt(dose2Draft.hourText, 10);
+        const d2m = parseInt(dose2Draft.minuteText, 10);
+        if (!Number.isFinite(d2h) || d2h < 1 || d2h > 12 || !Number.isFinite(d2m) || d2m < 0 || d2m > 59) {
+          errors.dose2Time = 'Ingresa una hora válida para la segunda dosis.';
+        }
+      }
+      if (showThirdDose) {
+        const d3h = parseInt(dose3Draft.hourText, 10);
+        const d3m = parseInt(dose3Draft.minuteText, 10);
+        if (!Number.isFinite(d3h) || d3h < 1 || d3h > 12 || !Number.isFinite(d3m) || d3m < 0 || d3m > 59) {
+          errors.dose3Time = 'Ingresa una hora válida para la tercera dosis.';
+        }
+      }
+    }
+    if (Object.keys(errors).length > 0) {
+      setFormErrors(errors);
+      return;
+    }
+    setFormErrors({});
+    if (wizardStep < WIZARD_TOTAL_STEPS) {
+      setWizardStep(wizardStep + 1);
+    } else {
+      handleSaveAlarm();
+    }
+  };
+
+  const handleWizardBack = () => {
+    if (wizardStep === 1) {
+      setModalVisible(false);
+      resetForm();
+    } else {
+      setFormErrors({});
+      setWizardStep(wizardStep - 1);
+    }
+  };
+  // ─────────────────────────────────────────────────────────────────────────
+
   return (
     <LinearGradient
       colors={isDark ? ['#1a1f3c', '#0f172a', '#000000'] : ['#667eea', '#764ba2', '#f093fb']}
@@ -1342,48 +1658,50 @@ export default function AlarmaYRecordatorio() {
           </View>
         )}
 
-        <ScrollView 
-          contentContainerStyle={[
-            styles.scrollContent,
-            { paddingBottom: scrollBottomPadding, flexGrow: 1 }
-          ]}
-          style={{ flex: 1 }}
-        >
-          {activeTab === 'alarmas' ? (
-            alarms.length === 0 ? (
+                {activeTab === 'alarmas' ? (
+          <FlatList
+            data={alarms}
+            keyExtractor={item => item.id}
+            contentContainerStyle={[
+              styles.scrollContent,
+              { paddingBottom: scrollBottomPadding, flexGrow: 1 }
+            ]}
+            style={{ flex: 1 }}
+            showsVerticalScrollIndicator={false}
+            ListEmptyComponent={() => (
               <Animatable.View animation="fadeIn" style={styles.emptyStateTransparent}>
                 <Ionicons name="alarm-outline" size={80} color="rgba(255,255,255,0.3)" />
                 <Text style={styles.emptyStateTextTransparent}>No tienes alarmas configuradas</Text>
               </Animatable.View>
-            ) : (
-              alarms.map((alarm, index) => (
-                <Animatable.View 
-                  key={alarm.id} 
-                  animation="fadeInUp" 
-                  delay={index * 100}
-                  style={[styles.alarmCard, !alarm.active && styles.alarmCardNoShadow]} // Aplicado estilo para quitar sombra
+            )}
+            renderItem={({ item: alarm, index }) => (
+                <Animatable.View
+                  key={alarm.id}
+                  animation="fadeInUp"
+                  delay={index * 100 > 1000 ? 0 : index * 100}
+                  style={[styles.alarmCard, !alarm.active && styles.alarmCardNoShadow]} 
                 >
                   <LinearGradient
                     colors={alarm.active ? (isDark ? ['#2d3748', '#1a202c'] : ['rgba(255,255,255,0.98)','rgba(235,238,255,0.95)']) : (isDark ? ['#1a202c', '#171923'] : ['rgba(255,255,255,0.5)','rgba(230,230,240,0.3)'])}
                     start={{ x: 0, y: 0 }}
                     end={{ x: 1, y: 1 }}
-                    style={[styles.alarmCardGradient, !alarm.active && styles.alarmCardInactive, isDark && {borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.3)'}]} 
+                    style={[styles.alarmCardGradient, !alarm.active && styles.alarmCardInactive, isDark && {borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.3)'}]}
                   >
                     <View style={styles.alarmInfo}>
                       <View style={styles.timeRow}>
                         <Text style={[styles.alarmTime, !alarm.active && styles.mutedText, isDark && {color: '#fff'}]}>
-                          {Array.isArray(alarm.times) && alarm.times.length > 0
+                          {Array.isArray(alarm.times) && alarm.times.length > 0 
                             ? alarm.times.map(t => `${String(t.hour).padStart(2,'0')}:${String(t.minute).padStart(2,'0')}`).join(' • ')
                             : `${alarm.hour}:${alarm.minute}`}
                         </Text>
                       </View>
-                      <Text style={[styles.alarmMedName, !alarm.active && styles.mutedText, isDark && {color: '#e2e8f0'}]}>{alarm.medName}</Text>
+                      <Text style={[styles.alarmMedName, !alarm.active && styles.mutedText, isDark && {color: '#e2e8f0'}]}>{limpiarMedicamento(alarm.medName || '').nombre || alarm.medName}</Text>
                       <Text style={[styles.alarmDose, !alarm.active && styles.mutedText, isDark && {color: '#cbd5e1'}]}>
-                        {alarm.medStrengthUnit ? `${alarm.medStrengthUnit.toUpperCase()}` : ''}
-                        {alarm.medStrength ? ` · ${alarm.medStrength}` : ''}
+                        {alarm.medStrengthUnit ? `${alarm.medStrengthUnit}` : ''}
+                        {alarm.medStrength ? ` · ${alarm.medStrength}` : ''}    
                       </Text>
                       <View style={styles.daysContainer}>
-                        {Array.isArray(alarm.days) && alarm.days.length > 0 ? (
+                        {Array.isArray(alarm.days) && alarm.days.length > 0 ? ( 
                            [...alarm.days]
                            .sort((a, b) => weekDays.findIndex(d => d.full === a) - weekDays.findIndex(d => d.full === b))
                            .map((day, idx) => (
@@ -1405,24 +1723,24 @@ export default function AlarmaYRecordatorio() {
                         onChange={(val) => handleToggleAlarm(alarm.id, val)}
                       />
                       <View style={styles.actionButtonsRow}>
-                        <TouchableOpacity 
+                        <TouchableOpacity
                           style={[
-                             styles.iconButton, 
+                             styles.iconButton,
                             !alarm.active && styles.iconButtonInactive,
                             externalSyncActive && { opacity: 0.5 }
                           ]}
                           disabled={externalSyncActive}
                           onPress={() => handleEditAlarm(alarm)}
                         >
-                          <Ionicons 
-                             name="pencil" 
-                             size={20} 
-                            color={!alarm.active ? "#7b7b8a" : "#667eea"} 
+                          <Ionicons
+                             name="pencil"
+                             size={20}
+                            color={!alarm.active ? "#7b7b8a" : "#667eea"}       
                           />
                         </TouchableOpacity>
-                        <TouchableOpacity 
+                        <TouchableOpacity
                           style={[
-                             styles.iconButton, 
+                             styles.iconButton,
                              styles.iconButtonDelete,
                             !alarm.active && styles.iconButtonInactive,
                             externalSyncActive && { opacity: 0.5 }
@@ -1430,45 +1748,49 @@ export default function AlarmaYRecordatorio() {
                           disabled={externalSyncActive}
                           onPress={() => handleDeleteAlarm(alarm.id)}
                         >
-                          <Ionicons 
-                             name="trash-outline" 
-                             size={20} 
-                             color={!alarm.active ? "#7b7b8a" : "#ff4444"} 
+                          <Ionicons
+                             name="trash-outline"
+                             size={20}
+                             color={!alarm.active ? "#7b7b8a" : "#ff4444"}      
                           />
                         </TouchableOpacity>
                       </View>
                     </View>
                   </LinearGradient>
                 </Animatable.View>
-              ))
-            )
-          ) : (
-            visibleReminderIds.length === 0 ? (
+            )}
+          />
+        ) : (
+          <FlatList
+            data={visibleReminderIds.map(id => alarms.find(a => a.id === id)).filter(Boolean)}
+            keyExtractor={item => item.id}
+            contentContainerStyle={[
+              styles.scrollContent,
+              { paddingBottom: scrollBottomPadding, flexGrow: 1 }
+            ]}
+            style={{ flex: 1 }}
+            showsVerticalScrollIndicator={false}
+            ListEmptyComponent={() => (
               <Animatable.View animation="fadeIn" style={styles.emptyStateTransparent}>
                 <Ionicons name="albums-outline" size={80} color="rgba(255,255,255,0.3)" />
                 <Text style={styles.emptyStateTextTransparent}>No tienes recordatorios configurados</Text>
               </Animatable.View>
-            ) : (
-              visibleReminderIds.map((id, index) => {
-                 const alarm = alarms.find(a => a.id === id);
-                 if (!alarm) return null;
-                 return (
-                    <Animatable.View 
-                      key={id} 
-                      animation="fadeInUp" 
-                      delay={index * 100}
-                    >
-                       <ReminderCard 
-                           alarm={alarm}
-                           lastTaken={lastTakenMap[id]}
-                           onDelete={() => handleRemoveVisibleReminder(id, 'delete')}
-                       />
-                    </Animatable.View>
-                 );
-              })
-            )
-          )}
-        </ScrollView>
+            )}
+            renderItem={({ item: alarm, index }) => (
+              <Animatable.View
+                key={alarm.id}
+                animation="fadeInUp"
+                delay={index * 100 > 1000 ? 0 : index * 100}
+              >
+                 <ReminderCard
+                     alarm={alarm}
+                     lastTaken={lastTakenMap[alarm.id]}
+                     onDelete={() => handleRemoveVisibleReminder(alarm.id, 'delete')}
+                 />
+              </Animatable.View>
+            )}
+          />
+        )}
 
 
 
@@ -1709,377 +2031,841 @@ export default function AlarmaYRecordatorio() {
           </View>
         </Modal>
 
-        {/* Modal Formulario Completo */}
+        {/* ── Wizard Nuevo Recordatorio ─────────────────────────────────── */}
         <Modal
           animationType="slide"
           transparent={true}
           visible={modalVisible}
-          onRequestClose={() => setModalVisible(false)}
+          onRequestClose={() => { setModalVisible(false); resetForm(); }}
         >
-          <View style={styles.modalOverlay}>
-            <KeyboardAvoidingView 
-              behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
-              style={{ flex: 1 }}
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={{ flex: 1 }}
+          >
+            <Pressable
+              style={{ flex: 1, backgroundColor: 'rgba(16, 10, 34, 0.6)' }}
+              onPress={() => { setModalVisible(false); resetForm(); }}
+            />
+            <Animatable.View
+              animation="slideInUp"
+              duration={300}
+              style={{
+                backgroundColor: isDark ? '#1e293b' : '#fdfbff',
+                borderTopLeftRadius: 28,
+                borderTopRightRadius: 28,
+                height: height * 0.88,
+                borderTopWidth: 1,
+                borderLeftWidth: 1,
+                borderRightWidth: 1,
+                borderColor: isDark ? '#334155' : 'rgba(118, 75, 162, 0.22)',
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: -4 },
+                shadowOpacity: 0.15,
+                shadowRadius: 12,
+                elevation: 16,
+                overflow: 'hidden',
+              }}
             >
-              <View style={styles.modalContainer}>
-                <Animatable.View animation="zoomIn" duration={320} style={[styles.modalContent, isDark && {backgroundColor: '#1e293b', borderColor: '#334155'}]}>
-                  <View style={styles.modalHeader}>
-                      <Text style={[styles.modalTitle, isDark && {color: '#fff'}]}>Nuevo Recordatorio</Text>
-                    <TouchableOpacity onPress={() => setModalVisible(false)}>
-                    <Ionicons name="close-circle" size={32} color="#999" />
-                    </TouchableOpacity>
-                </View>
+              {/* Handle bar */}
+              <View style={{ alignItems: 'center', paddingTop: 12, paddingBottom: 4 }}>
+                <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: isDark ? '#334155' : '#e2e8f0' }} />
+              </View>
 
-                <ScrollView showsVerticalScrollIndicator={false}>
-                {/* Nombre del medicamento */}
-                <View style={styles.inputGroup}>
-                  <Text style={[styles.inputLabel, isDark && {color: '#e2e8f0'}]}>Nombre del medicamento</Text>
-                  <TextInput
-                    style={[styles.textInput, !!formErrors.medName && styles.textInputError, isDark && {backgroundColor: '#334155', color: '#fff', borderColor: '#475569'}]}
-                    placeholder="Ej. Paracetamol, Ibuprofeno..."
-                    placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                    value={newAlarm.medName}
-                    onChangeText={(text) => {
-                      setNewAlarm({ ...newAlarm, medName: text });
-                      clearError('medName');
-                    }}
-                  />
-                  {!!formErrors.medName && <Text style={styles.errorText}>{formErrors.medName}</Text>}
-                </View>
-
-                {/* Tipo de medicamento */}
-                <View style={styles.inputGroup}>
-                  <Text style={[styles.inputLabel, isDark && {color: '#e2e8f0'}]}>Tipo de medicamento</Text>
-                  <Pressable
-                    onPress={() => setMedTypePickerVisible(true)}
-                    style={({ pressed }) => [
-                      styles.dropdown,
-                      pressed ? styles.dropdownPressed : null,
-                      isDark && { backgroundColor: '#334155', borderColor: '#475569' }
-                    ]}
-                  >
-                    <Text style={[styles.dropdownText, !newAlarm.medType && styles.dropdownPlaceholder, isDark && {color: newAlarm.medType ? '#fff' : '#94a3b8'}]}>
-                      {newAlarm.medType || 'Selecciona un tipo'}
-                    </Text>
-                    <Ionicons name="chevron-down" size={18} color="#667eea" />
-                  </Pressable>
-                </View>
-
-                {/* Dosis */}
-                <View style={styles.inputGroup}>
-                  <Text style={[styles.inputLabel, isDark && {color: '#e2e8f0'}]}>Dosis</Text>
-                  <View style={styles.doseRow}>
-                    <TextInput
-                      style={[styles.textInput, styles.doseInput, isDark && {backgroundColor: '#334155', color: '#fff', borderColor: '#475569'}]}
-                      keyboardType="numeric"
-                      placeholder="Ej. 500"
-                      placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                      value={newAlarm.medStrength}
-                      onChangeText={(text) => setNewAlarm({ ...newAlarm, medStrength: text })}
-                    />
-                    <TouchableOpacity
-                      style={[
-                        styles.dropdown,
-                        { marginTop: 0, flex: 0, width: 90, marginLeft: 10 },
-                        isDark && { backgroundColor: '#334155', borderColor: '#475569' }
-                      ]}
-                      onPress={() => setUnitPickerVisible(true)}
-                    >
-                      <Text style={[styles.dropdownText, isDark && {color: '#fff'}]}>
-                        {strengthUnits.find(u => u.value === newAlarm.medStrengthUnit)?.full || 'Mg'}
-                      </Text>
-                      <Ionicons name="chevron-down" size={18} color="#667eea" />
-                    </TouchableOpacity>
+              {/* Header */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 10, paddingBottom: 6 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <View style={{
+                    width: 28, height: 28, borderRadius: 14,
+                    backgroundColor: '#667eea',
+                    alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <Text style={{ color: '#fff', fontWeight: '800', fontSize: 13 }}>{wizardStep}</Text>
                   </View>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: isDark ? '#94a3b8' : '#64748b', letterSpacing: 0.3 }}>
+                    Paso {wizardStep} de {WIZARD_TOTAL_STEPS}
+                  </Text>
                 </View>
-
-                {/* Días de la semana */}
-                <View style={styles.inputGroup}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                    <Text style={[styles.inputLabel, { marginBottom: 0 }, isDark && {color: '#e2e8f0'}]}>Días de la semana</Text>
-                    <TouchableOpacity onPress={handleSelectAllDays}>
-                      <Text style={{ color: '#667eea', fontWeight: 'bold' }}>
-                        {newAlarm.days.length === weekDays.length ? 'Deseleccionar todo' : 'Seleccionar todo'}
-                      </Text>
-                    </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => { setModalVisible(false); resetForm(); }}
+                  style={{ padding: 4 }}
+                >
+                  <View style={{
+                    width: 30, height: 30, borderRadius: 15,
+                    backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                    alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <Ionicons name="close" size={18} color={isDark ? '#94a3b8' : '#64748b'} />
                   </View>
-                  <View style={styles.weekSquaresWrap}>
-                    {weekDays.map((dayObj) => {
-                      const dayName = dayObj.full;
-                      const selected = newAlarm.days.includes(dayName);
-                      return (
-                        <TouchableOpacity
-                          key={dayName}
-                          style={[styles.weekSquare, isDark && {backgroundColor: '#334155', borderColor: '#475569'}, selected && styles.weekSquareActive]}
-                          onPress={() => {
-                            toggleDay(dayName);
-                            clearError('days');
-                          }}
-                          activeOpacity={0.8}
-                        >
-                          <Text style={[styles.weekSquareText, isDark && {color: '#cbd5e1'}, selected && styles.weekSquareTextActive]}>
-                            {dayObj.short}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                  {!!formErrors.days && <Text style={styles.errorText}>{formErrors.days}</Text>}
-                </View>
+                </TouchableOpacity>
+              </View>
 
-                {/* Recordar antes */}
-                <View style={styles.inputGroup}>
-                  <Text style={[styles.inputLabel, isDark && {color: '#e2e8f0'}]}>Recordar antes</Text>
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                    {reminderOptions.map(opt => {
-                      const isActive = newAlarm.reminderMinutes === opt.value;
-                      return (
-                        <TouchableOpacity
-                          key={opt.value}
-                          style={[
-                            styles.chip,
-                            isActive && styles.chipActive,
-                            isDark && !isActive && { backgroundColor: '#334155', borderColor: '#475569' },
-                          ]}
-                          onPress={() => setNewAlarm({ ...newAlarm, reminderMinutes: opt.value })}
-                        >
-                          <Text style={[
-                            styles.chipText,
-                            isActive && styles.chipTextActive,
-                            isDark && !isActive && { color: '#cbd5e1' },
-                          ]}>
-                            {opt.label}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                </View>
-
-                {/* Primera dosis */}
-                <View style={styles.inputGroup}>
-                  <Text style={[styles.inputLabel, isDark && {color: '#e2e8f0'}]}>Primera dosis</Text>
-                  <View style={[styles.timePickerContainer, isDark && {backgroundColor: '#334155'}]}>
-                    <View style={styles.timePickerColumn}>
-                      <TextInput
-                        style={[styles.timeInput, isDark && {color: '#fff', backgroundColor: '#1e293b', borderColor: '#475569', borderWidth: 1}]}
-                        keyboardType="number-pad"
-                        maxLength={2}
-                        placeholder="12"
-                        placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                        value={timeDraft.hourText}
-                        onChangeText={handleHourChange}
-                        onBlur={commitTimeDraftToAlarm}
-                        onSubmitEditing={() => minuteInputRef.current?.focus()}
-                        returnKeyType="next"
-                        blurOnSubmit={false}
-                        selectTextOnFocus
-                      />
-                      <Text style={[styles.timePickerLabel, isDark && {color: '#cbd5e1'}]}>Hora</Text>
-                    </View>
-                    <Text style={[styles.timePickerSeparator, isDark && {color: '#e2e8f0'}]}>:</Text>
-                    <View style={styles.timePickerColumn}>
-                      <TextInput
-                        ref={minuteInputRef}
-                        style={[styles.timeInput, isDark && {color: '#fff', backgroundColor: '#1e293b', borderColor: '#475569', borderWidth: 1}]}
-                        keyboardType="number-pad"
-                        maxLength={2}
-                        placeholder="00"
-                        placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                        value={timeDraft.minuteText}
-                        onChangeText={handleMinuteChange}
-                        onBlur={commitTimeDraftToAlarm}
-                        selectTextOnFocus
-                      />
-                      <Text style={[styles.timePickerLabel, isDark && {color: '#cbd5e1'}]}>Minutos</Text>
-                    </View>
-                    <View style={styles.periodSelector}>
-                      <TouchableOpacity
-                        style={[styles.periodButton, period === 'AM' && styles.periodButtonActive]}
-                        onPress={() => setPeriod('AM')}
-                      >
-                        <Text style={[styles.periodText, period === 'AM' && styles.periodTextActive]}>AM</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.periodButton, period === 'PM' && styles.periodButtonActive]}
-                        onPress={() => setPeriod('PM')}
-                      >
-                        <Text style={[styles.periodText, period === 'PM' && styles.periodTextActive]}>PM</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                  {!!formErrors.time && <Text style={styles.errorText}>{formErrors.time}</Text>}
-                </View>
-
-                {/* Segunda dosis (opcional) */}
-                {!showSecondDose ? (
-                  <TouchableOpacity
-                    style={{
-                      flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                      paddingVertical: 10, marginBottom: 16, borderRadius: 10,
-                      borderWidth: 1, borderStyle: 'dashed',
-                      borderColor: isDark ? '#475569' : '#667eea',
-                    }}
-                    onPress={() => setShowSecondDose(true)}
-                  >
-                    <Ionicons name="add-circle-outline" size={20} color="#667eea" style={{ marginRight: 6 }} />
-                    <Text style={{ color: '#667eea', fontWeight: '600', fontSize: 15 }}>Añadir segunda dosis</Text>
-                  </TouchableOpacity>
-                ) : (
-                  <View style={styles.inputGroup}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                      <Text style={[styles.inputLabel, { marginBottom: 0 }, isDark && {color: '#e2e8f0'}]}>Segunda dosis</Text>
-                      <TouchableOpacity onPress={() => { setShowSecondDose(false); setShowThirdDose(false); }}>
-                        <Text style={{ color: '#ff4444', fontWeight: '600' }}>Eliminar</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <View style={[styles.timePickerContainer, isDark && {backgroundColor: '#334155'}]}>
-                      <View style={styles.timePickerColumn}>
-                        <TextInput
-                          style={[styles.timeInput, isDark && {color: '#fff', backgroundColor: '#1e293b', borderColor: '#475569', borderWidth: 1}]}
-                          keyboardType="number-pad"
-                          maxLength={2}
-                          placeholder="12"
-                          placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                          value={dose2Draft.hourText}
-                          onChangeText={(text) => setDose2Draft(prev => ({ ...prev, hourText: sanitizeTwoDigits(text) }))}
-                          onSubmitEditing={() => dose2MinuteRef.current?.focus()}
-                          returnKeyType="next"
-                          blurOnSubmit={false}
-                          selectTextOnFocus
-                        />
-                        <Text style={[styles.timePickerLabel, isDark && {color: '#cbd5e1'}]}>Hora</Text>
-                      </View>
-                      <Text style={[styles.timePickerSeparator, isDark && {color: '#e2e8f0'}]}>:</Text>
-                      <View style={styles.timePickerColumn}>
-                        <TextInput
-                          ref={dose2MinuteRef}
-                          style={[styles.timeInput, isDark && {color: '#fff', backgroundColor: '#1e293b', borderColor: '#475569', borderWidth: 1}]}
-                          keyboardType="number-pad"
-                          maxLength={2}
-                          placeholder="00"
-                          placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                          value={dose2Draft.minuteText}
-                          onChangeText={(text) => setDose2Draft(prev => ({ ...prev, minuteText: sanitizeTwoDigits(text) }))}
-                          selectTextOnFocus
-                        />
-                        <Text style={[styles.timePickerLabel, isDark && {color: '#cbd5e1'}]}>Minutos</Text>
-                      </View>
-                      <View style={styles.periodSelector}>
-                        <TouchableOpacity
-                          style={[styles.periodButton, dose2Period === 'AM' && styles.periodButtonActive]}
-                          onPress={() => setDose2Period('AM')}
-                        >
-                          <Text style={[styles.periodText, dose2Period === 'AM' && styles.periodTextActive]}>AM</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.periodButton, dose2Period === 'PM' && styles.periodButtonActive]}
-                          onPress={() => setDose2Period('PM')}
-                        >
-                          <Text style={[styles.periodText, dose2Period === 'PM' && styles.periodTextActive]}>PM</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                    {!!formErrors.dose2Time && <Text style={styles.errorText}>{formErrors.dose2Time}</Text>}
-                  </View>
-                )}
-
-                {/* Tercera dosis (opcional) - solo visible si hay segunda */}
-                {showSecondDose && (!showThirdDose ? (
-                  <TouchableOpacity
-                    style={{
-                      flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                      paddingVertical: 10, marginBottom: 16, borderRadius: 10,
-                      borderWidth: 1, borderStyle: 'dashed',
-                      borderColor: isDark ? '#475569' : '#667eea',
-                    }}
-                    onPress={() => setShowThirdDose(true)}
-                  >
-                    <Ionicons name="add-circle-outline" size={20} color="#667eea" style={{ marginRight: 6 }} />
-                    <Text style={{ color: '#667eea', fontWeight: '600', fontSize: 15 }}>Añadir tercera dosis</Text>
-                  </TouchableOpacity>
-                ) : (
-                  <View style={styles.inputGroup}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                      <Text style={[styles.inputLabel, { marginBottom: 0 }, isDark && {color: '#e2e8f0'}]}>Tercera dosis</Text>
-                      <TouchableOpacity onPress={() => setShowThirdDose(false)}>
-                        <Text style={{ color: '#ff4444', fontWeight: '600' }}>Eliminar</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <View style={[styles.timePickerContainer, isDark && {backgroundColor: '#334155'}]}>
-                      <View style={styles.timePickerColumn}>
-                        <TextInput
-                          style={[styles.timeInput, isDark && {color: '#fff', backgroundColor: '#1e293b', borderColor: '#475569', borderWidth: 1}]}
-                          keyboardType="number-pad"
-                          maxLength={2}
-                          placeholder="12"
-                          placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                          value={dose3Draft.hourText}
-                          onChangeText={(text) => setDose3Draft(prev => ({ ...prev, hourText: sanitizeTwoDigits(text) }))}
-                          onSubmitEditing={() => dose3MinuteRef.current?.focus()}
-                          returnKeyType="next"
-                          blurOnSubmit={false}
-                          selectTextOnFocus
-                        />
-                        <Text style={[styles.timePickerLabel, isDark && {color: '#cbd5e1'}]}>Hora</Text>
-                      </View>
-                      <Text style={[styles.timePickerSeparator, isDark && {color: '#e2e8f0'}]}>:</Text>
-                      <View style={styles.timePickerColumn}>
-                        <TextInput
-                          ref={dose3MinuteRef}
-                          style={[styles.timeInput, isDark && {color: '#fff', backgroundColor: '#1e293b', borderColor: '#475569', borderWidth: 1}]}
-                          keyboardType="number-pad"
-                          maxLength={2}
-                          placeholder="00"
-                          placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                          value={dose3Draft.minuteText}
-                          onChangeText={(text) => setDose3Draft(prev => ({ ...prev, minuteText: sanitizeTwoDigits(text) }))}
-                          selectTextOnFocus
-                        />
-                        <Text style={[styles.timePickerLabel, isDark && {color: '#cbd5e1'}]}>Minutos</Text>
-                      </View>
-                      <View style={styles.periodSelector}>
-                        <TouchableOpacity
-                          style={[styles.periodButton, dose3Period === 'AM' && styles.periodButtonActive]}
-                          onPress={() => setDose3Period('AM')}
-                        >
-                          <Text style={[styles.periodText, dose3Period === 'AM' && styles.periodTextActive]}>AM</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[styles.periodButton, dose3Period === 'PM' && styles.periodButtonActive]}
-                          onPress={() => setDose3Period('PM')}
-                        >
-                          <Text style={[styles.periodText, dose3Period === 'PM' && styles.periodTextActive]}>PM</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
+              {/* Progress bar */}
+              <View style={{ flexDirection: 'row', gap: 5, paddingHorizontal: 20, marginBottom: 6 }}>
+                {[1, 2, 3, 4, 5].map(s => (
+                  <View key={s} style={{ flex: 1, height: 5, borderRadius: 3, overflow: 'hidden', backgroundColor: isDark ? '#1e293b' : '#e9ecef' }}>
+                    <View style={{
+                      height: '100%', width: s <= wizardStep ? '100%' : '0%',
+                      backgroundColor: s < wizardStep ? '#667eea' : s === wizardStep ? '#764ba2' : 'transparent',
+                      borderRadius: 3,
+                    }} />
                   </View>
                 ))}
-
-              </ScrollView>
-
-              {/* Botón Guardar */}
-              <TouchableOpacity 
-                style={styles.saveButton}
-                onPress={handleSaveAlarm}
-              >
-                <LinearGradient
-                  colors={['#667eea', '#764ba2']}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={styles.saveButtonGradient}
-                >
-                  <Ionicons name="checkmark-circle" size={24} color="#fff" />
-                  <Text style={styles.saveButtonText}>{saveButtonLabel}</Text>
-                </LinearGradient>
-              </TouchableOpacity>
-                </Animatable.View>
               </View>
-            </KeyboardAvoidingView>
-          </View>
+
+                {/* Step content */}
+                <ScrollView
+                  showsVerticalScrollIndicator={false}
+                  style={{ flex: 1 }}
+                  contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 16, paddingBottom: 8 }}
+                  keyboardShouldPersistTaps="handled"
+                >
+
+                  {/* ── PASO 1: Medicamento ──────────────────────────────── */}
+                  {wizardStep === 1 && (
+                    <View>
+                      <Text style={{ fontSize: 24, fontWeight: '800', marginBottom: 5, color: isDark ? '#f1f5f9' : '#1e293b', letterSpacing: -0.5 }}>
+                        ¿Cómo se llama el medicamento?
+                      </Text>
+                      <Text style={{ fontSize: 14, color: isDark ? '#94a3b8' : '#64748b', marginBottom: 20, lineHeight: 20 }}>
+                        Escribe el nombre o búscalo en el registro sanitario
+                      </Text>
+
+                      {/* Buscador */}
+                      <View style={{
+                        flexDirection: 'row', alignItems: 'center',
+                        backgroundColor: isDark ? '#334155' : '#f1f5f9',
+                        borderRadius: 14, paddingHorizontal: 14, marginBottom: 8,
+                        borderWidth: !!formErrors.medName ? 1.5 : 0,
+                        borderColor: '#ff4444',
+                      }}>
+                        <Ionicons name="search" size={20} color="#667eea" style={{ marginRight: 10 }} />
+                        <TextInput
+                          style={{ flex: 1, paddingVertical: 14, fontSize: 16, color: isDark ? '#fff' : '#1e293b' }}
+                          placeholder="Buscar medicamento..."
+                          placeholderTextColor={isDark ? '#475569' : '#94a3b8'}
+                          value={medSearchQuery}
+                          onChangeText={(text) => {
+                            setMedSearchQuery(text);
+                            setNewAlarm(prev => ({ ...prev, medName: text }));
+                            clearError('medName');
+                            if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+                            searchTimeoutRef.current = setTimeout(() => searchMedications(text), 300);
+                          }}
+                          returnKeyType="search"
+                          autoCorrect={false}
+                        />
+                        {isSearching
+                          ? <ActivityIndicator size="small" color="#667eea" />
+                          : medSearchQuery.length > 0 && (
+                            <TouchableOpacity onPress={() => {
+                              setMedSearchQuery('');
+                              setMedSearchResults([]);
+                              setNewAlarm(prev => ({ ...prev, medName: '' }));
+                            }}>
+                              <Ionicons name="close-circle" size={18} color="#94a3b8" />
+                            </TouchableOpacity>
+                          )
+                        }
+                      </View>
+                      {!!formErrors.medName && <Text style={[styles.errorText, { marginBottom: 8 }]}>{formErrors.medName}</Text>}
+
+                      {/* Resultados API */}
+                      {medSearchResults.length > 0 && (
+                        <View style={{ borderRadius: 14, overflow: 'hidden', marginBottom: 16, borderWidth: 1, borderColor: isDark ? '#334155' : '#e2e8f0' }}>
+                          {medSearchResults.map((item, idx) => {
+                            const name = getMedDisplayName(item);
+                            const cleanInfo = limpiarMedicamento(name);
+                            const displayName = cleanInfo.nombre || name;
+                            const forma = (item.formafarmaceutica || '').trim();
+                            const concentracion = item.cantidad && item.unidadmedida
+                              ? `${item.cantidad.trim()} ${item.unidadmedida.trim()}`
+                              : '';
+                            const isSelected = newAlarm.medName === name;
+                            return (
+                              <TouchableOpacity
+                                key={idx}
+                                style={{
+                                  flexDirection: 'row', alignItems: 'center',
+                                  paddingVertical: 12, paddingHorizontal: 14,
+                                  backgroundColor: isSelected
+                                    ? (isDark ? 'rgba(99,102,241,0.2)' : '#eef2ff')
+                                    : (isDark ? '#1e293b' : '#fff'),
+                                  borderBottomWidth: idx < medSearchResults.length - 1 ? 1 : 0,
+                                  borderBottomColor: isDark ? '#334155' : '#f1f5f9',
+                                }}
+                                onPress={() => {
+                                  const info = limpiarMedicamento(name);
+                                  // Usar campos directos de la API si los tiene (son más precisos)
+                                  const forma = (item.formafarmaceutica || info.forma || '').trim();
+                                  const conc = item.cantidad && item.unidadmedida
+                                    ? `${item.cantidad.trim()} ${item.unidadmedida.trim()}`
+                                    : info.concentracion;
+                                  const nombreMostrar = info.nombre || name;
+                                  setNewAlarm(prev => ({
+                                    ...prev,
+                                    medName: nombreMostrar,
+                                    medType: forma,
+                                    medStrength: item.cantidad ? item.cantidad.trim() : prev.medStrength,
+                                    medStrengthUnit: item.unidadmedida ? item.unidadmedida.trim().toLowerCase() : prev.medStrengthUnit,
+                                  }));
+                                  setMedSearchQuery(nombreMostrar); // muestra nombre limpio en el buscador
+                                  setMedSearchResults([]);
+                                  setSelectedMedInfo({ nombre: nombreMostrar, forma, concentracion: conc });
+                                  clearError('medName');
+                                }}
+                              >
+                                <View style={{
+                                  width: 36, height: 36, borderRadius: 10,
+                                  backgroundColor: isSelected ? '#667eea' : (isDark ? '#334155' : '#eef2ff'),
+                                  alignItems: 'center', justifyContent: 'center', marginRight: 12,
+                                }}>
+                                  <Ionicons name="medical" size={18} color={isSelected ? '#fff' : '#667eea'} />
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  {/* Nombre limpio en sentence case */}
+                                  <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#fff' : '#1e293b' }} numberOfLines={2}>
+                                    {displayName}
+                                  </Text>
+                                  {/* Tipo · Concentración unidad */}
+                                  {(forma || concentracion) && (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3, gap: 4 }}>
+                                      {!!forma && (
+                                        <Text style={{
+                                          fontSize: 11, fontWeight: '600',
+                                          color: isDark ? '#a5b4fc' : '#667eea',
+                                          backgroundColor: isDark ? 'rgba(99,102,241,0.15)' : '#eef2ff',
+                                          borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2,
+                                        }}>
+                                          {forma}
+                                        </Text>
+                                      )}
+                                      {!!concentracion && (
+                                        <Text style={{ fontSize: 11, color: isDark ? '#94a3b8' : '#64748b', fontWeight: '500' }}>
+                                          {concentracion}
+                                        </Text>
+                                      )}
+                                    </View>
+                                  )}
+                                </View>
+                                {isSelected && <Ionicons name="checkmark-circle" size={20} color="#667eea" />}
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      )}
+
+                      {/* Card de medicamento seleccionado */}
+                      {selectedMedInfo && medSearchResults.length === 0 && (
+                        <Animatable.View
+                          animation="fadeInDown"
+                          duration={250}
+                          style={{
+                            backgroundColor: isDark ? 'rgba(99,102,241,0.18)' : '#eef2ff',
+                            borderRadius: 14, padding: 14, marginBottom: 14,
+                            borderWidth: 1.5, borderColor: isDark ? '#667eea' : '#c7d2fe',
+                          }}
+                        >
+                          {/* Fila superior: icono + nombre + botón cerrar */}
+                          <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+                            <View style={{
+                              width: 38, height: 38, borderRadius: 10,
+                              backgroundColor: '#667eea',
+                              alignItems: 'center', justifyContent: 'center',
+                              marginRight: 10, marginTop: 2, flexShrink: 0,
+                            }}>
+                              <Ionicons name="medical" size={20} color="#fff" />
+                            </View>
+                            <Text style={{
+                              flex: 1,
+                              fontWeight: '800', fontSize: 15,
+                              color: isDark ? '#f1f5f9' : '#1e293b',
+                              lineHeight: 21,
+                            }}>
+                              {selectedMedInfo.nombre}
+                            </Text>
+                            <TouchableOpacity
+                              onPress={() => {
+                                setSelectedMedInfo(null);
+                                setMedSearchQuery('');
+                                setNewAlarm(prev => ({ ...prev, medName: '', medType: '' }));
+                              }}
+                              style={{ padding: 4, marginLeft: 6, flexShrink: 0 }}
+                            >
+                              <Ionicons name="close-circle" size={20} color={isDark ? '#94a3b8' : '#a0aec0'} />
+                            </TouchableOpacity>
+                          </View>
+
+                          {/* Fila inferior: forma + concentración */}
+                          {(!!selectedMedInfo.forma || !!selectedMedInfo.concentracion) && (
+                            <View style={{
+                              flexDirection: 'row', alignItems: 'center',
+                              marginTop: 8, marginLeft: 48,
+                              gap: 8, flexWrap: 'wrap',
+                            }}>
+                              {!!selectedMedInfo.forma && (
+                                <Text style={{
+                                  fontSize: 11, fontWeight: '700',
+                                  color: isDark ? '#a5b4fc' : '#667eea',
+                                  backgroundColor: isDark ? 'rgba(99,102,241,0.2)' : '#e0e7ff',
+                                  borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2,
+                                }}>
+                                  {selectedMedInfo.forma}
+                                </Text>
+                              )}
+                              {!!selectedMedInfo.concentracion && (
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                  <Ionicons name="flask-outline" size={12} color={isDark ? '#94a3b8' : '#64748b'} />
+                                  <Text style={{ fontSize: 12, color: isDark ? '#cbd5e1' : '#475569', fontWeight: '700' }}>
+                                    {selectedMedInfo.concentracion}
+                                  </Text>
+                                </View>
+                              )}
+                            </View>
+                          )}
+                        </Animatable.View>
+                      )}
+
+                      {/* ¿No encuentras tu medicamento? */}
+                      <TouchableOpacity
+                        onPress={() => setManualMedModalVisible(true)}
+                        style={{
+                          flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                          paddingVertical: 12, marginBottom: 4,
+                          borderRadius: 12,
+                          backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(102,126,234,0.06)',
+                          borderWidth: 1, borderStyle: 'dashed',
+                          borderColor: isDark ? '#475569' : '#c7d2fe',
+                        }}
+                        activeOpacity={0.75}
+                      >
+                        <Ionicons name="help-circle-outline" size={18} color="#667eea" style={{ marginRight: 7 }} />
+                        <Text style={{ color: '#667eea', fontWeight: '700', fontSize: 14 }}>
+                          ¿No encuentras el medicamento que tomas?
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+
+                  {/* ── PASO 2: Días ─────────────────────────────────────── */}
+                  {wizardStep === 2 && (
+                    <View>
+                      <Text style={{ fontSize: 24, fontWeight: '800', marginBottom: 5, color: isDark ? '#f1f5f9' : '#1e293b', letterSpacing: -0.5 }}>
+                        ¿Cuándo lo tomas?
+                      </Text>
+                      <Text style={{ fontSize: 14, color: isDark ? '#94a3b8' : '#64748b', marginBottom: 20, lineHeight: 20 }}>
+                        Selecciona los días en que tomas este medicamento
+                      </Text>
+
+                      {/* Toggle todos los días */}
+                      <TouchableOpacity
+                        style={{
+                          flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                          backgroundColor: isDark ? '#334155' : '#f8fafc',
+                          borderRadius: 14, padding: 16, marginBottom: 16,
+                          borderWidth: newAlarm.days.length === weekDays.length ? 1.5 : 1,
+                          borderColor: newAlarm.days.length === weekDays.length ? '#667eea' : (isDark ? '#475569' : '#e2e8f0'),
+                        }}
+                        onPress={handleSelectAllDays}
+                        activeOpacity={0.8}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                          <View style={{
+                            width: 40, height: 40, borderRadius: 20,
+                            backgroundColor: newAlarm.days.length === weekDays.length ? '#667eea' : (isDark ? '#1e293b' : '#e2e8f0'),
+                            alignItems: 'center', justifyContent: 'center',
+                          }}>
+                            <Ionicons name="calendar" size={20} color={newAlarm.days.length === weekDays.length ? '#fff' : '#94a3b8'} />
+                          </View>
+                          <Text style={[{ fontSize: 16, fontWeight: '600' }, isDark && { color: '#fff' }]}>Todos los días</Text>
+                        </View>
+                        <View style={{
+                          width: 24, height: 24, borderRadius: 12, borderWidth: 2,
+                          borderColor: newAlarm.days.length === weekDays.length ? '#667eea' : '#94a3b8',
+                          backgroundColor: newAlarm.days.length === weekDays.length ? '#667eea' : 'transparent',
+                          alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          {newAlarm.days.length === weekDays.length && <Ionicons name="checkmark" size={14} color="#fff" />}
+                        </View>
+                      </TouchableOpacity>
+
+                      {/* Días individuales */}
+                      <View style={styles.weekSquaresWrap}>
+                        {weekDays.map((dayObj) => {
+                          const selected = newAlarm.days.includes(dayObj.full);
+                          return (
+                            <TouchableOpacity
+                              key={dayObj.full}
+                              style={[styles.weekSquare, isDark && { backgroundColor: '#334155', borderColor: '#475569' }, selected && styles.weekSquareActive]}
+                              onPress={() => { toggleDay(dayObj.full); clearError('days'); }}
+                              activeOpacity={0.8}
+                            >
+                              <Text style={[styles.weekSquareText, isDark && { color: '#cbd5e1' }, selected && styles.weekSquareTextActive]}>
+                                {dayObj.short}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                      {!!formErrors.days && <Text style={[styles.errorText, { marginTop: 8 }]}>{formErrors.days}</Text>}
+                    </View>
+                  )}
+
+                  {/* ── PASO 3: Antelación ───────────────────────────────── */}
+                  {wizardStep === 3 && (
+                    <View>
+                      <Text style={{ fontSize: 24, fontWeight: '800', marginBottom: 5, color: isDark ? '#f1f5f9' : '#1e293b', letterSpacing: -0.5 }}>
+                        ¿Con cuánta anticipación?
+                      </Text>
+                      <Text style={{ fontSize: 14, color: isDark ? '#94a3b8' : '#64748b', marginBottom: 24, lineHeight: 20 }}>
+                        Te avisaremos antes de que sea hora de tomar tu medicamento
+                      </Text>
+
+                      <View style={{ gap: 10 }}>
+                        {reminderOptions.map((opt) => {
+                          const selected = newAlarm.reminderMinutes === opt.value;
+                          return (
+                            <TouchableOpacity
+                              key={opt.value}
+                              style={{
+                                flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                                backgroundColor: selected ? (isDark ? 'rgba(99,102,241,0.2)' : '#eef2ff') : (isDark ? '#334155' : '#f8fafc'),
+                                borderRadius: 14, padding: 16,
+                                borderWidth: selected ? 1.5 : 1,
+                                borderColor: selected ? '#667eea' : (isDark ? '#475569' : '#e2e8f0'),
+                              }}
+                              onPress={() => setNewAlarm({ ...newAlarm, reminderMinutes: opt.value })}
+                              activeOpacity={0.8}
+                            >
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                                <View style={{
+                                  width: 40, height: 40, borderRadius: 20,
+                                  backgroundColor: selected ? '#667eea' : (isDark ? '#1e293b' : '#e2e8f0'),
+                                  alignItems: 'center', justifyContent: 'center',
+                                }}>
+                                  <Ionicons name="alarm-outline" size={20} color={selected ? '#fff' : '#94a3b8'} />
+                                </View>
+                                <Text style={[{ fontSize: 16, fontWeight: selected ? '700' : '500' }, isDark && { color: '#fff' }, selected && { color: isDark ? '#a5b4fc' : '#667eea' }]}>
+                                  {opt.label}
+                                </Text>
+                              </View>
+                              {selected && <Ionicons name="checkmark-circle" size={22} color="#667eea" />}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  )}
+
+                  {/* ── PASO 4: Horas de las dosis ───────────────────────── */}
+                  {wizardStep === 4 && (
+                    <View>
+                      <Text style={{ fontSize: 24, fontWeight: '800', marginBottom: 5, color: isDark ? '#f1f5f9' : '#1e293b', letterSpacing: -0.5 }}>
+                        ¿A qué horas lo tomas?
+                      </Text>
+                      <Text style={{ fontSize: 14, color: isDark ? '#94a3b8' : '#64748b', marginBottom: 20, lineHeight: 20 }}>
+                        Configura la hora para cada dosis del día
+                      </Text>
+
+                      {/* Dosis 1 */}
+                      <View style={{ marginBottom: 12 }}>
+                        <Text style={{ fontSize: 13, fontWeight: '600', color: isDark ? '#94a3b8' : '#64748b', marginBottom: 8 }}>Primera dosis</Text>
+                        <TouchableOpacity
+                          style={[styles.timePickerContainer, isDark && { backgroundColor: '#334155' }, { justifyContent: 'center', paddingVertical: 14 }]}
+                          onPress={() => setActiveTimePicker(1)}
+                          activeOpacity={0.75}
+                        >
+                          <Ionicons name="time-outline" size={20} color="#667eea" style={{ marginRight: 10 }} />
+                          <Text style={{ fontSize: 20, fontWeight: '700', color: '#667eea', letterSpacing: 1 }}>
+                            {timeDraft.hourText}:{timeDraft.minuteText} {period}
+                          </Text>
+                          <Ionicons name="chevron-down" size={18} color={isDark ? '#94a3b8' : '#64748b'} style={{ marginLeft: 8 }} />
+                        </TouchableOpacity>
+                        {!!formErrors.time && <Text style={styles.errorText}>{formErrors.time}</Text>}
+                      </View>
+
+                      {/* Dosis 2 */}
+                      {!showSecondDose ? (
+                        <TouchableOpacity
+                          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, marginBottom: 12, borderRadius: 14, borderWidth: 1.5, borderStyle: 'dashed', borderColor: isDark ? '#475569' : '#667eea' }}
+                          onPress={() => setShowSecondDose(true)}
+                        >
+                          <Ionicons name="add-circle-outline" size={20} color="#667eea" style={{ marginRight: 6 }} />
+                          <Text style={{ color: '#667eea', fontWeight: '600', fontSize: 15 }}>Añadir segunda dosis</Text>
+                        </TouchableOpacity>
+                      ) : (
+                        <View style={{ marginBottom: 12 }}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                            <Text style={{ fontSize: 13, fontWeight: '600', color: isDark ? '#94a3b8' : '#64748b' }}>Segunda dosis</Text>
+                            <TouchableOpacity onPress={() => { setShowSecondDose(false); setShowThirdDose(false); }}>
+                              <Text style={{ color: '#ff4444', fontWeight: '600', fontSize: 13 }}>Eliminar</Text>
+                            </TouchableOpacity>
+                          </View>
+                          <TouchableOpacity
+                            style={[styles.timePickerContainer, isDark && { backgroundColor: '#334155' }, { justifyContent: 'center', paddingVertical: 14 }]}
+                            onPress={() => setActiveTimePicker(2)}
+                            activeOpacity={0.75}
+                          >
+                            <Ionicons name="time-outline" size={20} color="#667eea" style={{ marginRight: 10 }} />
+                            <Text style={{ fontSize: 20, fontWeight: '700', color: '#667eea', letterSpacing: 1 }}>
+                              {dose2Draft.hourText}:{dose2Draft.minuteText} {dose2Period}
+                            </Text>
+                            <Ionicons name="chevron-down" size={18} color={isDark ? '#94a3b8' : '#64748b'} style={{ marginLeft: 8 }} />
+                          </TouchableOpacity>
+                          {!!formErrors.dose2Time && <Text style={styles.errorText}>{formErrors.dose2Time}</Text>}
+                        </View>
+                      )}
+
+                      {/* Dosis 3 */}
+                      {showSecondDose && (!showThirdDose ? (
+                        <TouchableOpacity
+                          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, marginBottom: 12, borderRadius: 14, borderWidth: 1.5, borderStyle: 'dashed', borderColor: isDark ? '#475569' : '#667eea' }}
+                          onPress={() => setShowThirdDose(true)}
+                        >
+                          <Ionicons name="add-circle-outline" size={20} color="#667eea" style={{ marginRight: 6 }} />
+                          <Text style={{ color: '#667eea', fontWeight: '600', fontSize: 15 }}>Añadir tercera dosis</Text>
+                        </TouchableOpacity>
+                      ) : (
+                        <View style={{ marginBottom: 12 }}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                            <Text style={{ fontSize: 13, fontWeight: '600', color: isDark ? '#94a3b8' : '#64748b' }}>Tercera dosis</Text>
+                            <TouchableOpacity onPress={() => setShowThirdDose(false)}>
+                              <Text style={{ color: '#ff4444', fontWeight: '600', fontSize: 13 }}>Eliminar</Text>
+                            </TouchableOpacity>
+                          </View>
+                          <TouchableOpacity
+                            style={[styles.timePickerContainer, isDark && { backgroundColor: '#334155' }, { justifyContent: 'center', paddingVertical: 14 }]}
+                            onPress={() => setActiveTimePicker(3)}
+                            activeOpacity={0.75}
+                          >
+                            <Ionicons name="time-outline" size={20} color="#667eea" style={{ marginRight: 10 }} />
+                            <Text style={{ fontSize: 20, fontWeight: '700', color: '#667eea', letterSpacing: 1 }}>
+                              {dose3Draft.hourText}:{dose3Draft.minuteText} {dose3Period}
+                            </Text>
+                            <Ionicons name="chevron-down" size={18} color={isDark ? '#94a3b8' : '#64748b'} style={{ marginLeft: 8 }} />
+                          </TouchableOpacity>
+                          {!!formErrors.dose3Time && <Text style={styles.errorText}>{formErrors.dose3Time}</Text>}
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {/* ── PASO 5: Cantidad por dosis ───────────────────────── */}
+                  {wizardStep === 5 && (
+                    <View>
+                      <Text style={{ fontSize: 24, fontWeight: '800', marginBottom: 5, color: isDark ? '#f1f5f9' : '#1e293b', letterSpacing: -0.5 }}>
+                        ¿Cuánto tomas en cada dosis?
+                      </Text>
+                      <Text style={{ fontSize: 14, color: isDark ? '#94a3b8' : '#64748b', marginBottom: 24, lineHeight: 20 }}>
+                        Indica la cantidad para cada una de tus dosis
+                      </Text>
+
+                      <View style={{ gap: 12 }}>
+                        {[0, 1, 2].slice(0, 1 + (showSecondDose ? 1 : 0) + (showThirdDose ? 1 : 0)).map((i) => {
+                          const ordinal = DOSE_ORDINALS_ES[i];
+                          // Usar la forma de la info seleccionada (más precisa que medType)
+                          const formaParaQ = selectedMedInfo?.forma || newAlarm.medType || '';
+                          const concParaQ = selectedMedInfo?.concentracion || '';
+                          const question = getQuestionDosis(formaParaQ, concParaQ, ordinal);
+                          const DOSE_COLORS = ['#667eea', '#764ba2', '#f093fb'];
+                          const doseLabel = ['Primera dosis', 'Segunda dosis', 'Tercera dosis'][i];
+                          const doseTimes = [
+                            `${timeDraft.hourText}:${timeDraft.minuteText} ${period}`,
+                            `${dose2Draft.hourText}:${dose2Draft.minuteText} ${dose2Period}`,
+                            `${dose3Draft.hourText}:${dose3Draft.minuteText} ${dose3Period}`,
+                          ];
+                          return (
+                            <View
+                              key={i}
+                              style={{ backgroundColor: isDark ? '#334155' : '#f8fafc', borderRadius: 16, padding: 16, borderWidth: 1, borderColor: isDark ? '#475569' : '#e2e8f0' }}
+                            >
+                              {/* Encabezado: número de dosis + hora */}
+                              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 10 }}>
+                                <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: DOSE_COLORS[i], alignItems: 'center', justifyContent: 'center' }}>
+                                  <Text style={{ color: '#fff', fontWeight: '800', fontSize: 14 }}>{i + 1}</Text>
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={[{ fontWeight: '700', fontSize: 15 }, isDark && { color: '#fff' }]}>{doseLabel}</Text>
+                                  <Text style={{ fontSize: 12, color: isDark ? '#94a3b8' : '#64748b' }}>{doseTimes[i]}</Text>
+                                </View>
+                              </View>
+
+                              {/* Pregunta */}
+                              <Text style={{ fontSize: 14, color: isDark ? '#cbd5e1' : '#475569', marginBottom: 14, lineHeight: 20 }}>
+                                {question}
+                              </Text>
+
+                              {/* Stepper centrado */}
+                              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 0 }}>
+                                {/* Botón − */}
+                                <TouchableOpacity
+                                  onPress={() => {
+                                    const next = [...(newAlarm.quantityPerDose || ['', '', ''])];
+                                    const cur = parseInt(next[i] || '0', 10);
+                                    if (cur > 0) next[i] = String(cur - 1);
+                                    setNewAlarm(prev => ({ ...prev, quantityPerDose: next }));
+                                  }}
+                                  style={{
+                                    width: 48, height: 52,
+                                    backgroundColor: isDark ? '#1e293b' : '#e0e7ff',
+                                    borderTopLeftRadius: 14, borderBottomLeftRadius: 14,
+                                    alignItems: 'center', justifyContent: 'center',
+                                    borderWidth: 1.5, borderRightWidth: 0,
+                                    borderColor: '#667eea',
+                                  }}
+                                  activeOpacity={0.7}
+                                >
+                                  <Text style={{ fontSize: 24, fontWeight: '700', color: '#667eea', lineHeight: 28 }}>−</Text>
+                                </TouchableOpacity>
+
+                                {/* Input numérico */}
+                                <TextInput
+                                  value={(newAlarm.quantityPerDose || ['', '', ''])[i] || ''}
+                                  onChangeText={(t) => {
+                                    const next = [...(newAlarm.quantityPerDose || ['', '', ''])];
+                                    next[i] = t.replace(/[^0-9]/g, '');
+                                    setNewAlarm(prev => ({ ...prev, quantityPerDose: next }));
+                                  }}
+                                  keyboardType="numeric"
+                                  placeholder="0"
+                                  placeholderTextColor={isDark ? '#475569' : '#ccc'}
+                                  style={{
+                                    width: 80, height: 52,
+                                    borderWidth: 1.5, borderColor: '#667eea',
+                                    backgroundColor: isDark ? '#0f172a' : '#fff',
+                                    color: isDark ? '#f1f5f9' : '#1e293b',
+                                    fontSize: 26, fontWeight: '800', textAlign: 'center',
+                                  }}
+                                />
+
+                                {/* Botón + */}
+                                <TouchableOpacity
+                                  onPress={() => {
+                                    const next = [...(newAlarm.quantityPerDose || ['', '', ''])];
+                                    const cur = parseInt(next[i] || '0', 10);
+                                    next[i] = String(cur + 1);
+                                    setNewAlarm(prev => ({ ...prev, quantityPerDose: next }));
+                                  }}
+                                  style={{
+                                    width: 48, height: 52,
+                                    backgroundColor: '#667eea',
+                                    borderTopRightRadius: 14, borderBottomRightRadius: 14,
+                                    alignItems: 'center', justifyContent: 'center',
+                                    borderWidth: 1.5, borderLeftWidth: 0,
+                                    borderColor: '#667eea',
+                                  }}
+                                  activeOpacity={0.7}
+                                >
+                                  <Text style={{ fontSize: 24, fontWeight: '700', color: '#fff', lineHeight: 28 }}>+</Text>
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  )}
+
+                </ScrollView>
+
+                {/* Barra de navegación */}
+                <View style={{
+                  flexDirection: 'row', gap: 10,
+                  paddingHorizontal: 20, paddingTop: 14,
+                  paddingBottom: insets.bottom > 0 ? insets.bottom + 8 : 22,
+                  borderTopWidth: 1,
+                  borderTopColor: isDark ? '#334155' : '#f1f5f9',
+                  backgroundColor: isDark ? '#1e293b' : '#fdfbff',
+                }}>
+                  <TouchableOpacity
+                    style={{
+                      flex: 1, paddingVertical: 15, borderRadius: 16,
+                      backgroundColor: isDark ? 'rgba(255,255,255,0.09)' : '#f1f5f9',
+                      alignItems: 'center', justifyContent: 'center',
+                      borderWidth: 1, borderColor: isDark ? '#334155' : '#e2e8f0',
+                    }}
+                    onPress={handleWizardBack}
+                  >
+                    <Text style={{ fontSize: 15, fontWeight: '700', color: isDark ? '#cbd5e1' : '#475569' }}>
+                      {wizardStep === 1 ? 'Cancelar' : '← Regresar'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={{ flex: 1, borderRadius: 16, overflow: 'hidden' }}
+                    onPress={handleWizardNext}
+                  >
+                    <LinearGradient
+                      colors={['#667eea', '#764ba2']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                      style={{ paddingVertical: 15, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8 }}
+                    >
+                      <Text style={{ fontSize: 15, fontWeight: '700', color: '#fff' }}>
+                        {wizardStep === WIZARD_TOTAL_STEPS ? (editingAlarmId ? 'Actualizar' : 'Guardar') : 'Continuar'}
+                      </Text>
+                      {wizardStep < WIZARD_TOTAL_STEPS
+                        ? <Ionicons name="arrow-forward" size={18} color="#fff" />
+                        : <Ionicons name="checkmark-circle" size={18} color="#fff" />
+                      }
+                    </LinearGradient>
+                  </TouchableOpacity>
+                </View>
+
+            </Animatable.View>
+          </KeyboardAvoidingView>
         </Modal>
 
-        {/* Modal de Biblioteca de Tonos */}
+        {/* ── Modal: ingresar medicamento manualmente ───────────────────── */}
+        <Modal
+          visible={manualMedModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setManualMedModalVisible(false)}
+        >
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(10,8,28,0.65)', paddingHorizontal: 20 }}
+          >
+            <Animatable.View
+              animation="zoomIn"
+              duration={260}
+              style={{
+                width: '100%',
+                backgroundColor: isDark ? '#1e293b' : '#fff',
+                borderRadius: 24,
+                padding: 24,
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 10 },
+                shadowOpacity: 0.25,
+                shadowRadius: 20,
+                elevation: 20,
+                borderWidth: 1,
+                borderColor: isDark ? '#334155' : 'rgba(118,75,162,0.15)',
+              }}
+            >
+              {/* Título */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 20 }}>
+                <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: '#667eea', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                  <Ionicons name="create-outline" size={22} color="#fff" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 17, fontWeight: '800', color: isDark ? '#f1f5f9' : '#1e293b' }}>
+                    Escribe tu medicamento
+                  </Text>
+                  <Text style={{ fontSize: 12, color: isDark ? '#94a3b8' : '#64748b', marginTop: 1 }}>
+                    Ingresa los datos como aparecen en el empaque
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => setManualMedModalVisible(false)} style={{ padding: 4 }}>
+                  <Ionicons name="close" size={20} color={isDark ? '#94a3b8' : '#64748b'} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Nombre */}
+              <Text style={{ fontSize: 13, fontWeight: '700', color: isDark ? '#94a3b8' : '#64748b', marginBottom: 6 }}>
+                Nombre del medicamento *
+              </Text>
+              <TextInput
+                style={{
+                  backgroundColor: isDark ? '#334155' : '#f8fafc',
+                  borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12,
+                  fontSize: 15, color: isDark ? '#f1f5f9' : '#1e293b',
+                  borderWidth: 1, borderColor: isDark ? '#475569' : '#e2e8f0',
+                  marginBottom: 14,
+                }}
+                placeholder="ej. Losartán, Metformina..."
+                placeholderTextColor={isDark ? '#475569' : '#94a3b8'}
+                value={manualMed.nombre}
+                onChangeText={t => setManualMed(p => ({ ...p, nombre: t }))}
+                autoCapitalize="words"
+              />
+
+              {/* Forma */}
+              <Text style={{ fontSize: 13, fontWeight: '700', color: isDark ? '#94a3b8' : '#64748b', marginBottom: 6 }}>
+                Forma farmacéutica
+              </Text>
+              <TextInput
+                style={{
+                  backgroundColor: isDark ? '#334155' : '#f8fafc',
+                  borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12,
+                  fontSize: 15, color: isDark ? '#f1f5f9' : '#1e293b',
+                  borderWidth: 1, borderColor: isDark ? '#475569' : '#e2e8f0',
+                  marginBottom: 14,
+                }}
+                placeholder="ej. Tableta, Cápsula, Jarabe..."
+                placeholderTextColor={isDark ? '#475569' : '#94a3b8'}
+                value={manualMed.forma}
+                onChangeText={t => setManualMed(p => ({ ...p, forma: t }))}
+                autoCapitalize="words"
+              />
+
+              {/* Concentración */}
+              <Text style={{ fontSize: 13, fontWeight: '700', color: isDark ? '#94a3b8' : '#64748b', marginBottom: 6 }}>
+                Concentración / Dosis
+              </Text>
+              <TextInput
+                style={{
+                  backgroundColor: isDark ? '#334155' : '#f8fafc',
+                  borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12,
+                  fontSize: 15, color: isDark ? '#f1f5f9' : '#1e293b',
+                  borderWidth: 1, borderColor: isDark ? '#475569' : '#e2e8f0',
+                  marginBottom: 22,
+                }}
+                placeholder="ej. 500 mg, 10 ml, 50 mcg..."
+                placeholderTextColor={isDark ? '#475569' : '#94a3b8'}
+                value={manualMed.concentracion}
+                onChangeText={t => setManualMed(p => ({ ...p, concentracion: t }))}
+                autoCapitalize="none"
+                keyboardType="default"
+              />
+
+              {/* Botones */}
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <TouchableOpacity
+                  style={{
+                    flex: 1, paddingVertical: 14, borderRadius: 14,
+                    backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : '#f1f5f9',
+                    alignItems: 'center', borderWidth: 1, borderColor: isDark ? '#334155' : '#e2e8f0',
+                  }}
+                  onPress={() => setManualMedModalVisible(false)}
+                >
+                  <Text style={{ fontSize: 15, fontWeight: '700', color: isDark ? '#94a3b8' : '#64748b' }}>Cancelar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{ flex: 1, borderRadius: 14, overflow: 'hidden' }}
+                  onPress={() => {
+                    const nombre = manualMed.nombre.trim();
+                    if (!nombre) return;
+                    setNewAlarm(prev => ({
+                      ...prev,
+                      medName: nombre,
+                      medType: manualMed.forma.trim(),
+                    }));
+                    setMedSearchQuery(nombre);
+                    setMedSearchResults([]);
+                    setSelectedMedInfo({
+                      nombre,
+                      forma: manualMed.forma.trim(),
+                      concentracion: manualMed.concentracion.trim(),
+                    });
+                    setManualMedModalVisible(false);
+                    clearError('medName');
+                  }}
+                >
+                  <LinearGradient
+                    colors={['#667eea', '#764ba2']}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={{ paddingVertical: 14, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 6 }}
+                  >
+                    <Ionicons name="checkmark" size={18} color="#fff" />
+                    <Text style={{ fontSize: 15, fontWeight: '700', color: '#fff' }}>Guardar</Text>
+                  </LinearGradient>
+                </TouchableOpacity>
+              </View>
+            </Animatable.View>
+          </KeyboardAvoidingView>
+        </Modal>
         <Modal
           animationType="slide"
           presentationStyle="fullScreen"
@@ -2261,7 +3047,14 @@ export default function AlarmaYRecordatorio() {
                     isDark && { backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#334155' }
                 ]}
             >
-              <Text style={[styles.pickerTitle, isDark && {color: '#fff'}]}>Tipo de medicamento</Text>
+              {/* Header con ícono */}
+              <View style={styles.pickerHeaderRow}>
+                <View style={[styles.pickerIconBadge, isDark && { backgroundColor: 'rgba(99,102,241,0.15)' }]}>
+                  <Ionicons name="medical-outline" size={20} color="#667eea" />
+                </View>
+                <Text style={[styles.pickerTitle, { marginBottom: 0 }, isDark && {color: '#fff'}]}>Tipo de medicamento</Text>
+              </View>
+              <View style={[styles.pickerDivider, isDark && { backgroundColor: '#334155' }]} />
               <View style={styles.pickerOptionsWrap}>
                 {medicationTypes.map((type) => {
                   const selected = newAlarm.medType === type;
@@ -2281,26 +3074,28 @@ export default function AlarmaYRecordatorio() {
                         setMedTypePickerVisible(false);
                       }}
                     >
-                      <Text style={[
-                          styles.pickerOptionText, 
-                          selected && styles.pickerOptionTextSelected,
-                          isDark && { color: '#cbd5e1' },
-                          isDark && selected && { color: '#818cf8' }
-                      ]}>
-                          {type}
-                      </Text>
-                      {selected ? <Ionicons name="checkmark" size={18} color={isDark ? "#818cf8" : "#667eea"} /> : null}
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                        <View style={[
+                          styles.pickerOptionDot,
+                          selected && styles.pickerOptionDotSelected,
+                          isDark && !selected && { borderColor: '#475569' },
+                        ]}>
+                          {selected && <View style={styles.pickerOptionDotInner} />}
+                        </View>
+                        <Text style={[
+                            styles.pickerOptionText, 
+                            selected && styles.pickerOptionTextSelected,
+                            isDark && { color: '#cbd5e1' },
+                            isDark && selected && { color: '#a5b4fc' }
+                        ]}>
+                            {type}
+                        </Text>
+                      </View>
+                      {selected && <Ionicons name="checkmark-circle" size={20} color={isDark ? "#a5b4fc" : "#667eea"} />}
                     </TouchableOpacity>
                   );
                 })}
               </View>
-              <TouchableOpacity
-                style={[styles.pickerCloseButton, isDark && { backgroundColor: '#0f172a', borderWidth: 1, borderColor: '#334155' }]}
-                activeOpacity={0.8}
-                onPress={() => setMedTypePickerVisible(false)}
-              >
-                <Text style={[styles.pickerCloseText, isDark && { color: '#fff' }]}>Cerrar</Text>
-              </TouchableOpacity>
             </Animatable.View>
           </Pressable>
         </Modal>
@@ -2321,7 +3116,13 @@ export default function AlarmaYRecordatorio() {
                     isDark && { backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#334155' }
                 ]}
             >
-              <Text style={[styles.pickerTitle, isDark && {color: '#fff'}]}>Unidad de medida</Text>
+              <View style={styles.pickerHeaderRow}>
+                <View style={[styles.pickerIconBadge, isDark && { backgroundColor: 'rgba(99,102,241,0.15)' }]}>
+                  <Ionicons name="flask-outline" size={20} color="#667eea" />
+                </View>
+                <Text style={[styles.pickerTitle, { marginBottom: 0 }, isDark && {color: '#fff'}]}>Unidad de medida</Text>
+              </View>
+              <View style={[styles.pickerDivider, isDark && { backgroundColor: '#334155' }]} />
               <View style={styles.pickerOptionsWrap}>
                 {strengthUnits.map((unit) => {
                   const selected = newAlarm.medStrengthUnit === unit.value;
@@ -2340,28 +3141,209 @@ export default function AlarmaYRecordatorio() {
                         setUnitPickerVisible(false);
                       }}
                     >
-                      <Text style={[
-                          styles.pickerOptionText, 
-                          selected && styles.pickerOptionTextSelected,
-                          isDark && { color: '#cbd5e1' },
-                          isDark && selected && { color: '#818cf8' }
-                      ]}>
-                          {unit.full}
-                      </Text>
-                      {selected ? <Ionicons name="checkmark" size={18} color={isDark ? "#818cf8" : "#667eea"} /> : null}
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                        <View style={[
+                          styles.pickerOptionDot,
+                          selected && styles.pickerOptionDotSelected,
+                          isDark && !selected && { borderColor: '#475569' },
+                        ]}>
+                          {selected && <View style={styles.pickerOptionDotInner} />}
+                        </View>
+                        <Text style={[
+                            styles.pickerOptionText, 
+                            selected && styles.pickerOptionTextSelected,
+                            isDark && { color: '#cbd5e1' },
+                            isDark && selected && { color: '#a5b4fc' }
+                        ]}>
+                            {unit.full}
+                        </Text>
+                      </View>
+                      {selected && <Ionicons name="checkmark-circle" size={20} color={isDark ? "#a5b4fc" : "#667eea"} />}
                     </TouchableOpacity>
                   );
                 })}
               </View>
-              <TouchableOpacity
-                style={[styles.pickerCloseButton, isDark && { backgroundColor: '#0f172a', borderWidth: 1, borderColor: '#334155' }]}
-                activeOpacity={0.8}
-                onPress={() => setUnitPickerVisible(false)}
-              >
-                <Text style={[styles.pickerCloseText, isDark && { color: '#fff' }]}>Cerrar</Text>
-              </TouchableOpacity>
             </Animatable.View>
           </Pressable>
+        </Modal>
+
+        {/* Dropdown Recordar antes */}
+        <Modal
+          animationType="fade"
+          transparent
+          visible={reminderPickerVisible}
+          onRequestClose={() => setReminderPickerVisible(false)}
+        >
+          <Pressable style={styles.pickerOverlay} onPress={() => setReminderPickerVisible(false)}>
+            <Animatable.View
+              animation="fadeInUp"
+              duration={220}
+              style={[
+                styles.pickerCard,
+                isDark && { backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#334155' }
+              ]}
+            >
+              <View style={styles.pickerHeaderRow}>
+                <View style={[styles.pickerIconBadge, isDark && { backgroundColor: 'rgba(99,102,241,0.15)' }]}>
+                  <Ionicons name="alarm-outline" size={20} color="#667eea" />
+                </View>
+                <Text style={[styles.pickerTitle, { marginBottom: 0 }, isDark && { color: '#fff' }]}>Recordar antes</Text>
+              </View>
+              <View style={[styles.pickerDivider, isDark && { backgroundColor: '#334155' }]} />
+              <View style={styles.pickerOptionsWrap}>
+                {reminderOptions.map((opt) => {
+                  const selected = newAlarm.reminderMinutes === opt.value;
+                  return (
+                    <TouchableOpacity
+                      key={opt.value}
+                      style={[
+                        styles.pickerOption,
+                        selected && styles.pickerOptionSelected,
+                        isDark && { backgroundColor: '#0f172a', borderColor: '#334155' },
+                        isDark && selected && { backgroundColor: 'rgba(99, 102, 241, 0.2)', borderColor: '#6366f1' }
+                      ]}
+                      activeOpacity={0.85}
+                      onPress={() => {
+                        setNewAlarm({ ...newAlarm, reminderMinutes: opt.value });
+                        setReminderPickerVisible(false);
+                      }}
+                    >
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                        <View style={[
+                          styles.pickerOptionDot,
+                          selected && styles.pickerOptionDotSelected,
+                          isDark && !selected && { borderColor: '#475569' },
+                        ]}>
+                          {selected && <View style={styles.pickerOptionDotInner} />}
+                        </View>
+                        <Text style={[
+                          styles.pickerOptionText,
+                          selected && styles.pickerOptionTextSelected,
+                          isDark && { color: '#cbd5e1' },
+                          isDark && selected && { color: '#a5b4fc' }
+                        ]}>
+                          {opt.label}
+                        </Text>
+                      </View>
+                      {selected && <Ionicons name="checkmark-circle" size={20} color={isDark ? "#a5b4fc" : "#667eea"} />}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </Animatable.View>
+          </Pressable>
+        </Modal>
+
+        {/* ── Modal Cantidad a tomar ─────────────────────────────────────────── */}
+        <Modal
+          visible={quantityPickerVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setQuantityPickerVisible(false)}
+        >
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', paddingHorizontal: 24 }}>
+            <Pressable style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0 }} onPress={() => setQuantityPickerVisible(false)} />
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+              <Animatable.View
+                animation="fadeInUp"
+                duration={220}
+                style={[
+                  styles.pickerCard,
+                  isDark && { backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#334155' }
+                ]}
+              >
+                <View style={styles.pickerHeaderRow}>
+                  <View style={[styles.pickerIconBadge, isDark && { backgroundColor: 'rgba(99,102,241,0.15)' }]}>
+                    <Ionicons name="medical-outline" size={20} color="#667eea" />
+                  </View>
+                  <Text style={[styles.pickerTitle, { marginBottom: 0 }, isDark && { color: '#fff' }]}>Cantidad a tomar</Text>
+                </View>
+                <View style={[styles.pickerDivider, isDark && { backgroundColor: '#334155' }]} />
+                {[0, 1, 2].slice(0, 1 + (showSecondDose ? 1 : 0) + (showThirdDose ? 1 : 0)).map((i) => {
+                  const type = (newAlarm.medType || '').toLowerCase().trim();
+                  const ordinal = DOSE_ORDINALS_ES[i];
+                  // Pregunta específica por tipo
+                  let question;
+                  if (type === 'jarabe') {
+                    question = `¿Cuántas cucharadas de jarabe tomas en tu ${ordinal} dosis?`;
+                  } else if (type === 'inyección' || type === 'inyeccion') {
+                    question = `¿Cuántas inyecciones te aplicas en tu ${ordinal} dosis?`;
+                  } else {
+                    const plural = newAlarm.medType ? pluralizeType(newAlarm.medType).toLowerCase() : 'unidades';
+                    const cuantas = isMasculine(newAlarm.medType) ? '¿Cuántos' : '¿Cuántas';
+                    question = `${cuantas} ${plural} tomas en tu ${ordinal} dosis?`;
+                  }
+                  const DOSE_COLORS = ['#667eea', '#764ba2', '#f093fb'];
+                  return (
+                    <View
+                      key={i}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        backgroundColor: isDark ? 'rgba(99,102,241,0.07)' : `rgba(102,126,234,0.06)`,
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: isDark ? '#334155' : '#e8eaf6',
+                        paddingHorizontal: 14,
+                        paddingVertical: 10,
+                        marginBottom: 10,
+                        gap: 10,
+                      }}
+                    >
+                      {/* Badge ordinal de dosis */}
+                      <View style={{
+                        width: 28, height: 28, borderRadius: 14,
+                        backgroundColor: DOSE_COLORS[i],
+                        alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        <Text style={{ color: '#fff', fontSize: 13, fontWeight: '800' }}>{i + 1}</Text>
+                      </View>
+                      {/* Pregunta */}
+                      <Text style={[
+                        { flex: 1, fontSize: 13, color: '#444', lineHeight: 18 },
+                        isDark && { color: '#cbd5e1' }
+                      ]}>
+                        {question}
+                      </Text>
+                      {/* Input compacto */}
+                      <TextInput
+                        value={(newAlarm.quantityPerDose || ['', '', ''])[i] || ''}
+                        onChangeText={(t) => {
+                          const next = [...(newAlarm.quantityPerDose || ['', '', ''])];
+                          next[i] = t.replace(/[^0-9]/g, '');
+                          setNewAlarm(prev => ({ ...prev, quantityPerDose: next }));
+                        }}
+                        keyboardType="numeric"
+                        placeholder="0"
+                        placeholderTextColor={isDark ? '#475569' : '#ccc'}
+                        style={[
+                          {
+                            width: 62,
+                            height: 44,
+                            borderRadius: 10,
+                            borderWidth: 1.5,
+                            borderColor: '#667eea',
+                            backgroundColor: isDark ? '#0f172a' : '#fff',
+                            color: isDark ? '#f1f5f9' : '#1e293b',
+                            fontSize: 20,
+                            fontWeight: '700',
+                            textAlign: 'center',
+                            paddingHorizontal: 0,
+                          }
+                        ]}
+                      />
+                    </View>
+                  );
+                })}
+                <TouchableOpacity
+                  style={[styles.pickerCloseButton, { marginTop: 6 }]}
+                  onPress={() => setQuantityPickerVisible(false)}
+                >
+                  <Text style={styles.pickerCloseText}>Listo</Text>
+                </TouchableOpacity>
+              </Animatable.View>
+            </KeyboardAvoidingView>
+          </View>
         </Modal>
 
       <Modal
@@ -2415,6 +3397,34 @@ export default function AlarmaYRecordatorio() {
           </Animatable.View>
         </View>
       </Modal>
+
+      {/* Wheel picker de tiempo para dosis 1, 2, 3 */}
+      <TimePickerModal
+        visible={activeTimePicker !== null}
+        hour={
+          activeTimePicker === 2 ? dose2Draft.hourText :
+          activeTimePicker === 3 ? dose3Draft.hourText :
+          timeDraft.hourText
+        }
+        minute={
+          activeTimePicker === 2 ? dose2Draft.minuteText :
+          activeTimePicker === 3 ? dose3Draft.minuteText :
+          timeDraft.minuteText
+        }
+        period={
+          activeTimePicker === 2 ? dose2Period :
+          activeTimePicker === 3 ? dose3Period :
+          period
+        }
+        title={
+          activeTimePicker === 2 ? 'Segunda dosis' :
+          activeTimePicker === 3 ? 'Tercera dosis' :
+          'Primera dosis'
+        }
+        onConfirm={handleTimePickerConfirm}
+        onCancel={() => setActiveTimePicker(null)}
+      />
+
       </SafeAreaView>
     </LinearGradient>
   );
