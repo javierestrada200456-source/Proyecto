@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Modal, StyleSheet, TouchableOpacity, BackHandler, NativeModules } from 'react-native';
+import { View, Text, Modal, StyleSheet, TouchableOpacity, BackHandler, NativeModules, Dimensions } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Animatable from 'react-native-animatable';
@@ -40,6 +40,7 @@ function buildFormaBase(medType, qty) {
 }
 
 const { AlarmModule } = NativeModules;
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 export default function AlarmScreen({ visible, data, onDismiss, onSnooze, onAccept }) {
   const insets = useSafeAreaInsets();
@@ -257,11 +258,6 @@ export default function AlarmScreen({ visible, data, onDismiss, onSnooze, onAcce
         </View>
 
         <View style={styles.buttonContainer}>
-          <TouchableOpacity style={styles.snoozeButton} onPress={handleSnooze}>
-            <Ionicons name="time-outline" size={24} color="#ccc" />
-            <Text style={styles.buttonText}>Posponer 5 min</Text>
-          </TouchableOpacity>
-
             <TouchableOpacity style={styles.acceptButton} onPress={handleAccept}>
                 <Ionicons name="checkmark-circle" size={32} color="#fff" />
                 <Text style={styles.acceptButtonText}>Aceptar</Text>
@@ -314,7 +310,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   bigTime: {
-    fontSize: 80,
+    fontSize: Math.min(80, SCREEN_W * 0.2),
     fontWeight: 'bold',
     color: '#fff',
     textShadowColor: 'rgba(255,255,255,0.1)',
@@ -329,8 +325,8 @@ const styles = StyleSheet.create({
   },
   infoContainer: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.05)', // Más sutil
-    padding: 30,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    padding: Math.min(30, SCREEN_W * 0.07),
     borderRadius: 20,
     width: '100%',
     borderWidth: 1,
@@ -342,7 +338,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   medName: {
-    fontSize: 36,
+    fontSize: Math.min(36, SCREEN_W * 0.09),
     fontWeight: 'bold',
     color: '#fff',
     textAlign: 'center',
@@ -355,9 +351,8 @@ const styles = StyleSheet.create({
   },
   buttonContainer: {
     width: '100%',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   snoozeButton: {
     flex: 1,
@@ -377,8 +372,8 @@ const styles = StyleSheet.create({
     marginLeft: 6,
   },
   acceptButton: {
-    flex: 1,
-    backgroundColor: '#4facfe', // Azul brillante para acción principal
+    width: '65%',
+    backgroundColor: '#4facfe',
     paddingVertical: 18,
     borderRadius: 50,
     flexDirection: 'row',

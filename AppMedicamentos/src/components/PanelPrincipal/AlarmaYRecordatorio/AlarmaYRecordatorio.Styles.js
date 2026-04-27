@@ -102,10 +102,11 @@ export const styles = StyleSheet.create({
   },
   // Estado vacío transparente
   emptyStateTransparent: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 60,
-    marginTop: 40,
+    padding: 40,
+    minHeight: 260,
   },
   emptyStateTextTransparent: {
     color: 'rgba(255,255,255,0.5)',
@@ -326,12 +327,44 @@ export const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  // Botón icono musical (flotante, sobre el +)
+  musicFab: {
+    position: 'absolute',
+    right: 32,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#8b5cf6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    elevation: 10,
+    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: 'rgba(139,92,246,0.4)',
+  },
+  musicFabTouchable: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 26,
+  },
+  musicFabGradient: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+    borderRadius: 26,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
 
-  // Toast (mensaje animado de creado/actualizado)
+  // Toast (mensaje animado de creado/actualizado - flota sobre el botón +)
   toastWrap: {
-    paddingHorizontal: 16,
-    marginTop: 10,
-    marginBottom: 6,
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    zIndex: 999,
   },
   toastCard: {
     borderRadius: 18,

@@ -12,6 +12,7 @@ import * as Notifications from 'expo-notifications';
 import { authService, supabase } from '../../../services/supabaseClient';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../../../context/ThemeContext';
+import SoundSettingsModal from '../AlarmaYRecordatorio/SoundSettingsModal';
 
 const styles = StyleSheet.create({
   container: {
@@ -558,6 +559,18 @@ const getNextDoseTime = (doseTimes) => {
   return sorted[0] || null;
 };
 
+// Convierte "HH:MM" (24h) a "H:MM AM/PM" (12h)
+const to12h = (hhmm) => {
+  if (!hhmm) return hhmm;
+  const parts = String(hhmm).split(':');
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  if (isNaN(h) || isNaN(m)) return hhmm;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 || 12;
+  return `${h12}:${String(m).padStart(2, '0')} ${ampm}`;
+};
+
 // Nombres de días en español (índice = getDay())
 const DAY_NAMES_ES = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 
@@ -716,6 +729,13 @@ export default function ConectarRecordatorios() {
   const [syncedUsers, setSyncedUsers] = useState({}); // { [userId]: boolean }
   const [syncBanner, setSyncBanner] = useState(null); // { type, message }
   const [clockTick, setClockTick] = useState(0);
+  const [soundModalVisible, setSoundModalVisible] = useState(false);
+
+  // Historial de dosis del paciente (cuidador)
+  const [doseHistoryModal, setDoseHistoryModal] = useState(false);
+  const [doseHistoryData, setDoseHistoryData] = useState([]);
+  const [doseHistoryLoading, setDoseHistoryLoading] = useState(false);
+  const [doseHistoryPatient, setDoseHistoryPatient] = useState('');
 
   const [myCode, setMyCode] = useState('CARGANDO...');
   const [connectCode, setConnectCode] = useState('');
@@ -1103,6 +1123,24 @@ export default function ConectarRecordatorios() {
 
     if (error || !Array.isArray(data)) return [];
     return data.map(mapReminderRow);
+  };
+
+  const openPatientDoseHistory = async (patient) => {
+    setDoseHistoryPatient(patient.name || 'Paciente');
+    setDoseHistoryModal(true);
+    setDoseHistoryLoading(true);
+    setDoseHistoryData([]);
+    try {
+      const { data, error } = await supabase
+        .from('dose_history')
+        .select('*')
+        .eq('user_id', patient.id)
+        .order('taken_at', { ascending: true });
+      if (!error && Array.isArray(data)) {
+        setDoseHistoryData(data);
+      }
+    } catch (_e) {}
+    setDoseHistoryLoading(false);
   };
 
   const loadLinkedAccounts = async () => {
@@ -1761,6 +1799,30 @@ export default function ConectarRecordatorios() {
           style={styles.container}
         >
           <View style={[styles.safeArea, { paddingTop: insets.top }]}>
+            <Animatable.View animation="slideInDown" duration={600} style={styles.header}>
+                    <TouchableOpacity
+                      style={styles.backButton}
+                      onPress={handleBackPress}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="arrow-back" size={24} color="#fff" />
+                    </TouchableOpacity>
+                    <Text style={styles.headerTitle}>
+                       {viewMode === 'main' ? 'Conecta tus recordatorios' : 
+                        viewMode === 'list' ? 'Cuentas Enlazadas' : 'Detalle de Cuenta'}
+                    </Text>
+                    <TouchableOpacity
+                      style={[styles.backButton, {
+                        backgroundColor: 'rgba(139,92,246,0.18)',
+                        borderWidth: 1.5,
+                        borderColor: 'rgba(139,92,246,0.45)',
+                      }]}
+                      onPress={() => setSoundModalVisible(true)}
+                      activeOpacity={0.75}
+                    >
+                      <Ionicons name="musical-note" size={20} color="#a78bfa" />
+                    </TouchableOpacity>
+                  </Animatable.View>
             <KeyboardAvoidingView 
                 behavior={Platform.OS === 'ios' ? 'padding' : undefined}
                 style={{ flex: 1 }}
@@ -1771,19 +1833,6 @@ export default function ConectarRecordatorios() {
                     keyboardShouldPersistTaps="handled"
                     showsVerticalScrollIndicator={false}
                 >
-                  <Animatable.View animation="slideInDown" duration={600} style={styles.header}>
-                    <TouchableOpacity
-                      style={styles.backButton}
-                      onPress={handleBackPress}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="arrow-back" size={24} color="#fff" />
-                    </TouchableOpacity>
-                    <Text style={styles.headerTitle}>
-                       {viewMode === 'main' ? 'Vincular Dispositivo' : 
-                        viewMode === 'list' ? 'Cuentas Enlazadas' : 'Detalle de Cuenta'}
-                    </Text>
-                  </Animatable.View>
 
                   {!!syncBanner?.message && (
                     <Animatable.View
@@ -1945,7 +1994,7 @@ export default function ConectarRecordatorios() {
           {viewMode === 'list' && (
              <Animatable.View animation="fadeInUp" duration={500}>
               {linkedAccounts.length === 0 ? (
-                <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: 60 }}>
+                <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 100, minHeight: 600 }}>
                   <Ionicons name="people-outline" size={80} color="rgba(255,255,255,0.3)" />
                   <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 16, marginTop: 16, textAlign: 'center' }}>Sin cuentas enlazadas</Text>
                   <Text style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, marginTop: 6, textAlign: 'center' }}>Conecta una cuenta con código o QR.</Text>
@@ -2014,7 +2063,7 @@ export default function ConectarRecordatorios() {
                                   )}
                                   {selectedUser.gender && (
                                     <View style={styles.statBadge}>
-                                        <Text style={styles.statText}>👤 {selectedUser.gender}</Text>
+                                        <Text style={styles.statText}>👤 {selectedUser.gender === 'male' ? 'Masculino' : selectedUser.gender === 'female' ? 'Femenino' : selectedUser.gender}</Text>
                                     </View>
                                   )}
                                   {selectedUser.weight && (
@@ -2032,32 +2081,14 @@ export default function ConectarRecordatorios() {
                       </View>
 
                       {/* Info médica adicional */}
-                      {(selectedUser.medicalCondition || selectedUser.allergies || selectedUser.emergencyContact) && (
+                      {selectedUser.medicalCondition && (
                         <View style={{ marginTop: 12, gap: 6 }}>
-                          {selectedUser.medicalCondition && (
-                            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6 }}>
-                              <Ionicons name="medkit-outline" size={14} color="rgba(255,255,255,0.7)" style={{ marginTop: 2 }} />
-                              <Text style={{ color: 'rgba(255,255,255,0.85)', fontSize: 12, flex: 1 }}>
-                                <Text style={{ fontWeight: '700' }}>Condición: </Text>{selectedUser.medicalCondition}
-                              </Text>
-                            </View>
-                          )}
-                          {selectedUser.allergies && (
-                            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6 }}>
-                              <Ionicons name="alert-circle-outline" size={14} color="rgba(255,200,0,0.9)" style={{ marginTop: 2 }} />
-                              <Text style={{ color: 'rgba(255,255,255,0.85)', fontSize: 12, flex: 1 }}>
-                                <Text style={{ fontWeight: '700', color: 'rgba(255,220,0,0.9)' }}>Alergias: </Text>{selectedUser.allergies}
-                              </Text>
-                            </View>
-                          )}
-                          {selectedUser.emergencyContact && (
-                            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6 }}>
-                              <Ionicons name="call-outline" size={14} color="rgba(255,255,255,0.7)" style={{ marginTop: 2 }} />
-                              <Text style={{ color: 'rgba(255,255,255,0.85)', fontSize: 12, flex: 1 }}>
-                                <Text style={{ fontWeight: '700' }}>Contacto emergencia: </Text>{selectedUser.emergencyContact}
-                              </Text>
-                            </View>
-                          )}
+                          <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6 }}>
+                            <Ionicons name="medkit-outline" size={14} color="rgba(255,255,255,0.7)" style={{ marginTop: 2 }} />
+                            <Text style={{ color: 'rgba(255,255,255,0.85)', fontSize: 12, flex: 1 }}>
+                              <Text style={{ fontWeight: '700' }}>Condición: </Text>{selectedUser.medicalCondition}
+                            </Text>
+                          </View>
                         </View>
                       )}
 
@@ -2208,7 +2239,7 @@ export default function ConectarRecordatorios() {
                                             <Text style={{ fontSize: 9, fontWeight: '800', color: isNext ? '#fff' : (isDark ? '#94a3b8' : '#64748b') }}>{idx + 1}</Text>
                                           </View>
                                           <Text style={{ fontSize: 13, fontWeight: '700', color: isNext ? '#2563eb' : (isDark ? '#e2e8f0' : '#334155') }}>
-                                            {t}
+                                            {to12h(t)}
                                           </Text>
                                           {isNext && (
                                             <Text style={{ fontSize: 9, color: '#2563eb', fontWeight: '700', marginLeft: 4 }}>← Próx.</Text>
@@ -2257,11 +2288,28 @@ export default function ConectarRecordatorios() {
                                       <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(46,204,113,0.1)', padding: 8, borderRadius: 10, marginTop: 4 }}>
                                         <Ionicons name="notifications" size={14} color="#2ecc71" style={{ marginRight: 6 }} />
                                         <Text style={{ color: '#27ae60', fontWeight: '700', fontSize: 12, flex: 1 }}>
-                                          Aviso a las {parsed.hhmm} ({whenTxt})
+                                          Aviso a las {to12h(parsed.hhmm)} ({whenTxt})
                                         </Text>
                                       </View>
                                     );
                                   })()}
+
+                                  {/* Botón ver historial de dosis del paciente */}
+                                  <TouchableOpacity
+                                    onPress={() => openPatientDoseHistory(selectedUser)}
+                                    activeOpacity={0.8}
+                                    style={{
+                                      flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                                      marginTop: 10, paddingVertical: 9, borderRadius: 12, gap: 6,
+                                      backgroundColor: isDark ? 'rgba(102,126,234,0.15)' : 'rgba(102,126,234,0.1)',
+                                      borderWidth: 1, borderColor: 'rgba(102,126,234,0.3)',
+                                    }}
+                                  >
+                                    <Ionicons name="time-outline" size={16} color="#667eea" />
+                                    <Text style={{ fontSize: 12, fontWeight: '700', color: '#667eea' }}>
+                                      Ver historial de dosis
+                                    </Text>
+                                  </TouchableOpacity>
                                 </View>
                               </View>
                             );
@@ -2370,6 +2418,156 @@ export default function ConectarRecordatorios() {
             </Animatable.View>
         </View>
       </Modal>
+
+      {/* Modal Historial de Dosis del Paciente */}
+      <Modal
+        visible={doseHistoryModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setDoseHistoryModal(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
+          <Animatable.View
+            animation="slideInUp"
+            duration={350}
+            style={{
+              backgroundColor: isDark ? '#0f172a' : '#f1f5f9',
+              borderTopLeftRadius: 24, borderTopRightRadius: 24,
+              maxHeight: '85%', paddingBottom: 30,
+            }}
+          >
+            {/* Header */}
+            <LinearGradient
+              colors={['#667eea', '#764ba2']}
+              start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+              style={{ borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 18, flexDirection: 'row', alignItems: 'center' }}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: '#fff', fontSize: 17, fontWeight: '800' }}>
+                  📋 Historial de dosis
+                </Text>
+                <Text style={{ color: 'rgba(255,255,255,0.75)', fontSize: 12, marginTop: 2 }}>
+                  {doseHistoryPatient}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setDoseHistoryModal(false)} activeOpacity={0.7}>
+                <Ionicons name="close-circle" size={30} color="rgba(255,255,255,0.85)" />
+              </TouchableOpacity>
+            </LinearGradient>
+
+            <ScrollView style={{ padding: 16 }} showsVerticalScrollIndicator={false}>
+              {doseHistoryLoading ? (
+                <View style={{ alignItems: 'center', paddingVertical: 50 }}>
+                  <Ionicons name="hourglass-outline" size={36} color="#667eea" />
+                  <Text style={{ color: isDark ? '#94a3b8' : '#64748b', marginTop: 10, fontSize: 14 }}>Cargando historial...</Text>
+                </View>
+              ) : doseHistoryData.length === 0 ? (
+                <View style={{ alignItems: 'center', paddingVertical: 50 }}>
+                  <Ionicons name="document-text-outline" size={52} color="rgba(102,126,234,0.35)" />
+                  <Text style={{ color: isDark ? '#64748b' : '#94a3b8', marginTop: 14, fontSize: 15, fontWeight: '700', textAlign: 'center' }}>
+                    Sin historial disponible
+                  </Text>
+                  <Text style={{ color: isDark ? '#475569' : '#aaa', marginTop: 6, fontSize: 12, textAlign: 'center' }}>
+                    El historial se registra cuando el paciente acepta sus dosis.
+                  </Text>
+                </View>
+              ) : (() => {
+                const pad = (n) => String(n).padStart(2, '0');
+                const today = new Date();
+                const yesterday = new Date(today);
+                yesterday.setDate(today.getDate() - 1);
+                const getDateLabel = (ts) => {
+                  const d = new Date(ts);
+                  if (d.toDateString() === today.toDateString()) return 'Hoy';
+                  if (d.toDateString() === yesterday.toDateString()) return 'Ayer';
+                  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+                };
+                const fmt12 = (d) => {
+                  const h = d.getHours(), m = pad(d.getMinutes());
+                  const ampm = h >= 12 ? 'PM' : 'AM';
+                  return `${h % 12 || 12}:${m} ${ampm}`;
+                };
+
+                // Construir items con separadores de fecha
+                const items = [];
+                let lastLabel = '';
+                doseHistoryData.forEach((entry) => {
+                  const label = getDateLabel(entry.taken_at);
+                  if (label !== lastLabel) {
+                    items.push({ type: 'sep', label });
+                    lastLabel = label;
+                  }
+                  items.push({ type: 'msg', entry });
+                });
+
+                return items.map((item, idx) => {
+                  if (item.type === 'sep') {
+                    return (
+                      <View key={`sep-${idx}`} style={{ alignItems: 'center', marginVertical: 12 }}>
+                        <View style={{
+                          backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.07)',
+                          borderRadius: 12, paddingHorizontal: 14, paddingVertical: 4,
+                        }}>
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: isDark ? '#94a3b8' : '#64748b' }}>
+                            {item.label}
+                          </Text>
+                        </View>
+                      </View>
+                    );
+                  }
+                  const { entry } = item;
+                  const takenDate = new Date(entry.taken_at);
+                  const scheduledDate = entry.scheduled_time ? new Date(entry.scheduled_time) : null;
+                  return (
+                    <View key={entry.id || idx} style={{ alignItems: 'flex-end', marginBottom: 8, paddingLeft: 40 }}>
+                      <View style={{
+                        backgroundColor: '#16a34a',
+                        borderRadius: 18, borderBottomRightRadius: 4,
+                        paddingHorizontal: 14, paddingVertical: 10,
+                        shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+                        shadowOpacity: 0.15, shadowRadius: 4, elevation: 3,
+                        maxWidth: '85%',
+                      }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: scheduledDate ? 4 : 2 }}>
+                          <Ionicons name="checkmark-circle" size={13} color="rgba(255,255,255,0.9)" style={{ marginRight: 5 }} />
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: '#fff' }}>
+                            {entry.dose_label || 'Dosis'}
+                          </Text>
+                        </View>
+                        <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.9)', fontWeight: '600', marginBottom: 3 }}>
+                          💊 {entry.med_name}
+                        </Text>
+                        {scheduledDate && (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                            <Ionicons name="alarm-outline" size={11} color="rgba(255,255,255,0.65)" style={{ marginRight: 4 }} />
+                            <Text style={{ fontSize: 10, color: 'rgba(255,255,255,0.7)' }}>
+                              Programada: {fmt12(scheduledDate)}
+                            </Text>
+                          </View>
+                        )}
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 4, marginTop: 2 }}>
+                          <Text style={{ fontSize: 10, color: 'rgba(255,255,255,0.75)' }}>
+                            {fmt12(takenDate)}
+                          </Text>
+                          <Ionicons name="checkmark-done" size={12} color="rgba(255,255,255,0.9)" />
+                        </View>
+                      </View>
+                    </View>
+                  );
+                });
+              })()}
+            </ScrollView>
+          </Animatable.View>
+        </View>
+      </Modal>
+
+      {/* Modal de Sonidos y Tonos */}
+      <SoundSettingsModal
+        visible={soundModalVisible}
+        onClose={() => setSoundModalVisible(false)}
+        isDark={isDark}
+        theme={theme}
+      />
 
     </View>
   );

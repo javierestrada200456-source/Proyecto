@@ -9,6 +9,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { styles } from './AlarmaYRecordatorio.Styles';
 import { scheduleMedicationNotification, cancelMedicationNotification, registerForPushNotificationsAsync, dismissPresentedNotificationsForAlarm } from './NotificacionesORecordatorios';
 import ReminderCard from '../ReminderCard';
+import SoundSettingsModal from './SoundSettingsModal';
 
 import * as DocumentPicker from 'expo-document-picker';
 import { Audio } from 'expo-av';
@@ -256,6 +257,7 @@ export default function AlarmaYRecordatorio() {
   const [toast, setToast] = useState(null);
   const toastRef = useRef(null);
   const searchTimeoutRef = useRef(null);
+  const [soundModalVisible, setSoundModalVisible] = useState(false);
 
   const [newAlarm, setNewAlarm] = useState({
     id: null,
@@ -341,6 +343,31 @@ export default function AlarmaYRecordatorio() {
           // Eliminar el recordatorio completamente (local + Supabase + notificaciones)
           const alarm = alarms.find(a => a.id === id);
           if (alarm) await cancelMedicationNotification(alarm.notificationIds);
+
+          // Eliminar historial local si ningún otro recordatorio usa el mismo med
+          if (alarm?.medName) {
+            try {
+              const DOSE_HISTORY_KEY = '@dose_history';
+              const histStored = await AsyncStorage.getItem(DOSE_HISTORY_KEY);
+              if (histStored) {
+                const hist = JSON.parse(histStored);
+                const remainingWithSameMed = alarms.filter(a => a.id !== id && a.medName === alarm.medName);
+                if (remainingWithSameMed.length === 0) {
+                  const filtered = hist.filter(h => h.medName !== alarm.medName);
+                  await AsyncStorage.setItem(DOSE_HISTORY_KEY, JSON.stringify(filtered));
+                  // También borrar de Supabase
+                  try {
+                    const { data: { user } } = await authService.getCurrentUser();
+                    if (user) {
+                      await supabase.from('dose_history').delete()
+                        .eq('user_id', user.id).eq('med_name', alarm.medName);
+                    }
+                  } catch (_e) {}
+                }
+              }
+            } catch (_e) {}
+          }
+
           const updatedAlarms = alarms.filter(a => a.id !== id);
           setAlarms(updatedAlarms);
 
@@ -993,6 +1020,32 @@ export default function AlarmaYRecordatorio() {
 
      const alarm = alarms.find(a => a.id === id);
      if (alarm) await cancelMedicationNotification(alarm.notificationIds);
+
+     // Eliminar historial local de dosis para este medicamento
+     if (alarm?.medName) {
+       try {
+         const DOSE_HISTORY_KEY = '@dose_history';
+         const histStored = await AsyncStorage.getItem(DOSE_HISTORY_KEY);
+         if (histStored) {
+           const hist = JSON.parse(histStored);
+           const remaining = alarms.filter(a => a.id !== id && a.medName === alarm.medName);
+           // Solo eliminar historial si ningún otro recordatorio usa el mismo medicamento
+           if (remaining.length === 0) {
+             const filtered = hist.filter(h => h.medName !== alarm.medName);
+             await AsyncStorage.setItem(DOSE_HISTORY_KEY, JSON.stringify(filtered));
+             // También borrar de Supabase
+             try {
+               const { data: { user } } = await authService.getCurrentUser();
+               if (user) {
+                 await supabase.from('dose_history').delete()
+                   .eq('user_id', user.id).eq('med_name', alarm.medName);
+               }
+             } catch (_e) {}
+           }
+         }
+       } catch (_e) {}
+     }
+
      const updatedAlarms = alarms.filter(a => a.id !== id);
      setAlarms(updatedAlarms);
 
@@ -1613,42 +1666,6 @@ export default function AlarmaYRecordatorio() {
           <Text style={styles.headerTitle}>{activeTab === 'recordatorios' ? 'Crea tus recordatorios' : 'Alarma y Recordatorios'}</Text>
         </View>
 
-        {!!toast && (
-          <Animatable.View
-            ref={toastRef}
-            animation="slideInDown"
-            duration={300}
-            style={styles.toastWrap}
-          >
-            <LinearGradient
-              colors={
-                toast.type === 'error'
-                  ? ['#ff5f6d', '#ffc371']
-                  : toast.type === 'info'
-                    ? ['#4facfe', '#00f2fe']
-                    : ['#667eea', '#764ba2']
-              }
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.toastCard}
-            >
-              <View style={styles.toastIcon}>
-                <Ionicons
-                  name={toast.type === 'error' ? 'alert-circle' : toast.type === 'info' ? 'information-circle' : 'checkmark-circle'}
-                  size={22}
-                  color="#fff"
-                />
-              </View>
-              <View style={styles.toastTextWrap}>
-                <Text style={styles.toastTitle}>{toast.title}</Text>
-                <Text style={styles.toastMessage} numberOfLines={2}>
-                  {toast.message}
-                </Text>
-              </View>
-            </LinearGradient>
-          </Animatable.View>
-        )}
-
         {externalSyncActive && (
           <View style={styles.syncWarningCard}>
             <Ionicons name="alert-circle" size={20} color="#fff" style={{ marginRight: 8 }} />
@@ -1797,6 +1814,30 @@ export default function AlarmaYRecordatorio() {
         {activeTab === 'alarmas' && (
           <Animatable.View
             animation="zoomIn"
+            duration={600}
+            delay={80}
+            style={[styles.musicFab, { bottom: fabBottom + 78 }]}
+          >
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={styles.musicFabTouchable}
+              onPress={() => setSoundModalVisible(true)}
+            >
+              <LinearGradient
+                colors={isDark ? ['#1e293b', '#0f172a'] : ['#1e293b', '#334155']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.musicFabGradient}
+              >
+                <Ionicons name="musical-note" size={22} color="#8b5cf6" />
+              </LinearGradient>
+            </TouchableOpacity>
+          </Animatable.View>
+        )}
+
+        {activeTab === 'alarmas' && (
+          <Animatable.View
+            animation="zoomIn"
             duration={500}
             style={[styles.fab, { bottom: fabBottom }]}
           >
@@ -1816,6 +1857,30 @@ export default function AlarmaYRecordatorio() {
                 style={styles.fabGradient}
               >
                 <Ionicons name="add" size={34} color="#fff" />
+              </LinearGradient>
+            </TouchableOpacity>
+          </Animatable.View>
+        )}
+
+        {activeTab === 'recordatorios' && (
+          <Animatable.View
+            animation="zoomIn"
+            duration={600}
+            delay={80}
+            style={[styles.musicFab, { bottom: fabBottom + 78 }]}
+          >
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={styles.musicFabTouchable}
+              onPress={() => setSoundModalVisible(true)}
+            >
+              <LinearGradient
+                colors={isDark ? ['#1e293b', '#0f172a'] : ['#1e293b', '#334155']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.musicFabGradient}
+              >
+                <Ionicons name="musical-note" size={22} color="#8b5cf6" />
               </LinearGradient>
             </TouchableOpacity>
           </Animatable.View>
@@ -1847,6 +1912,51 @@ export default function AlarmaYRecordatorio() {
             </TouchableOpacity>
           </Animatable.View>
         )}
+
+        {/* Toast flotante - aparece arriba del botón + */}
+        {!!toast && (
+          <Animatable.View
+            ref={toastRef}
+            animation="slideInUp"
+            duration={400}
+            style={[styles.toastWrap, { bottom: fabBottom + 82 }]}
+          >
+            <LinearGradient
+              colors={
+                toast.type === 'error'
+                  ? ['#ff5f6d', '#ffc371']
+                  : toast.type === 'info'
+                    ? ['#4facfe', '#00f2fe']
+                    : ['#667eea', '#764ba2']
+              }
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.toastCard}
+            >
+              <View style={styles.toastIcon}>
+                <Ionicons
+                  name={toast.type === 'error' ? 'alert-circle' : toast.type === 'info' ? 'information-circle' : 'checkmark-circle'}
+                  size={22}
+                  color="#fff"
+                />
+              </View>
+              <View style={styles.toastTextWrap}>
+                <Text style={styles.toastTitle}>{toast.title}</Text>
+                <Text style={styles.toastMessage} numberOfLines={2}>
+                  {toast.message}
+                </Text>
+              </View>
+            </LinearGradient>
+          </Animatable.View>
+        )}
+
+        {/* SoundSettingsModal - accesible desde el icono musical */}
+        <SoundSettingsModal
+          visible={soundModalVisible}
+          onClose={() => setSoundModalVisible(false)}
+          isDark={isDark}
+          theme={theme}
+        />
 
         <Modal
           visible={reminderAddModalVisible}

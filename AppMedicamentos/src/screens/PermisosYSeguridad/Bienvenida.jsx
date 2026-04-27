@@ -32,6 +32,7 @@ export default function Bienvenida({ onContinue }) {
   const insets = useSafeAreaInsets();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const appState = useRef(AppState.currentState);
+  const checkPermissionsRef = useRef(null);
 
   const [permissionsState, setPermissionsState] = useState({
     notifications: false,
@@ -56,32 +57,39 @@ export default function Bienvenida({ onContinue }) {
       const { status: notifStatus } = await Notifications.getPermissionsAsync();
       const notifGranted = notifStatus === 'granted';
 
-      // Verificar permisos nativos
-      let backgroundGranted = permissionsState.background; 
+      // Verificar si batería optimizada está desactivada (permiso de segundo plano real)
+      let backgroundGranted = false;
       let exactAlarmGranted = true;
 
       if (Platform.OS === 'android' && AlarmModule) {
-           if (Platform.Version >= 31 && AlarmModule.checkExactAlarmPermission) {
-               exactAlarmGranted = await AlarmModule.checkExactAlarmPermission();
-           }
+        if (AlarmModule.checkBatteryOptimization) {
+          try {
+            backgroundGranted = await AlarmModule.checkBatteryOptimization();
+          } catch (_) {}
+        }
+        if (Platform.Version >= 31 && AlarmModule.checkExactAlarmPermission) {
+          exactAlarmGranted = await AlarmModule.checkExactAlarmPermission();
+        }
       }
 
-      setPermissionsState(prev => ({ 
-        ...prev, 
-        notifications: notifGranted, 
-        // Mantenemos el estado previo si era true, o el nuevo valor
-        background: prev.background || backgroundGranted, 
+      setPermissionsState(prev => ({
+        ...prev,
+        notifications: notifGranted,
+        background: prev.background || backgroundGranted,
         exactAlarm: exactAlarmGranted,
       }));
-      setPermissionsStatus(prev => ({ 
-        ...prev, 
-        notifications: notifStatus, 
-        background: null 
+      setPermissionsStatus(prev => ({
+        ...prev,
+        notifications: notifStatus,
+        background: null
       }));
     } catch (e) {
       console.log('Error checking initial permissions:', e);
     }
   };
+
+  // Mantener ref actualizada con la última versión de checkPermissions (evita stale closure)
+  useEffect(() => { checkPermissionsRef.current = checkPermissions; });
 
   useEffect(() => {
     Keyboard.dismiss();
@@ -94,9 +102,8 @@ export default function Bienvenida({ onContinue }) {
         appState.current.match(/inactive|background/) &&
         nextAppState === 'active'
       ) {
-        // App ha vuelto al primer plano, re-verificar permisos
-        console.log("App has come to foreground, checking permissions...");
-        checkPermissions();
+        // App ha vuelto al primer plano, re-verificar permisos con la versión más reciente
+        if (checkPermissionsRef.current) checkPermissionsRef.current();
       }
       appState.current = nextAppState;
     });

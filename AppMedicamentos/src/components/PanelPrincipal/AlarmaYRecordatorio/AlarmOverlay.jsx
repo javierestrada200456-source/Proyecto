@@ -3,6 +3,7 @@ import { Platform, NativeModules, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import AlarmScreen from './AlarmScreen';
 import { notifyCaregivers } from '../../../services/CaregiverNotifications';
+import { supabase, authService } from '../../../services/supabaseClient';
 
 const { AlarmModule } = NativeModules;
 const STORAGE_LAST_TAKEN_KEY = '@app_medicamentos_last_taken';
@@ -28,6 +29,20 @@ const saveToHistory = async (data, takenAt) => {
       takenAt,
     });
     await AsyncStorage.setItem(DOSE_HISTORY_KEY, JSON.stringify(history));
+
+    // Guardar en Supabase para que el cuidador/familiar pueda ver el historial
+    try {
+      const { data: { user } } = await authService.getCurrentUser();
+      if (user) {
+        await supabase.from('dose_history').insert({
+          user_id: user.id,
+          med_name: data?.medName || 'Medicamento',
+          dose_label: getDoseLabel(data?.doseIndex),
+          scheduled_time: data?.alarmTimestamp ? new Date(data.alarmTimestamp).toISOString() : null,
+          taken_at: new Date(takenAt).toISOString(),
+        });
+      }
+    } catch (_e) { /* Supabase save optional */ }
   } catch (_e) { /* noop */ }
 };
 

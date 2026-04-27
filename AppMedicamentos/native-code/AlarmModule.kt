@@ -157,4 +157,14 @@ class AlarmModule(private val reactContext: ReactApplicationContext) :
         promise.resolve(null)
     }
   }
+
+  @ReactMethod
+  fun checkBatteryOptimization(promise: Promise) {
+    try {
+      val powerManager = reactContext.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+      promise.resolve(powerManager.isIgnoringBatteryOptimizations(reactContext.packageName))
+    } catch (e: Exception) {
+      promise.resolve(false)
+    }
+  }
 }
