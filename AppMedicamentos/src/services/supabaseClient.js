@@ -155,6 +155,11 @@ class AuthService {
 
   // --- MÉTODOS DE PERFIL ---
 
+  // Actualizar metadatos del usuario autenticado (ej. username)
+  async updateUserMetadata(metadata) {
+    return await this.client.auth.updateUser({ data: metadata });
+  }
+
   // Guardar/Actualizar perfil
   async upsertProfile(profileData) {
     const { data: { user } } = await this.client.auth.getUser();

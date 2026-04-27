@@ -59,6 +59,7 @@ export default function InformacionPerfil({ onBack }) {
   const [saving, setSaving] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [showLogoutModal, setShowLogoutModal] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [profileImage, setProfileImage] = useState(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
@@ -360,18 +361,18 @@ export default function InformacionPerfil({ onBack }) {
     try {
       setSaving(true);
 
-      const ageNum = editDraft.age ? parseInt(editDraft.age, 10) : null;
-      const weightNum = editDraft.weight ? parseFloat(editDraft.weight) : null;
       const cleanName = (editDraft.name || '').trim() || null;
+      const ageNum = editDraft.age ? parseInt(editDraft.age, 10) : null;
 
+      // Campos a guardar en la nube (tabla profiles)
       const updates = {
         name: cleanName,
-        full_name: cleanName,   // para que el cuidador lo vea siempre correctamente
         age: Number.isFinite(ageNum) ? ageNum : null,
-        weight: Number.isFinite(weightNum) ? weightNum : null,
+        gender: (editDraft.gender || '').trim() || null,
+        medical_conditions: (editDraft.medicalConditions || '').trim() || null,
+        // Campos extra que ya existen en profiles
         blood_type: (editDraft.bloodType || '').trim() || null,
         allergies: (editDraft.allergies || '').trim() || null,
-        medical_conditions: (editDraft.medicalConditions || '').trim() || null,
         emergency_contact: (editDraft.emergencyContact || '').trim() || null,
       };
 
@@ -380,12 +381,13 @@ export default function InformacionPerfil({ onBack }) {
 
       const nextProfileData = {
         ...(profileData || {}),
+        name: updates.name || '',
         edad: updates.age !== null ? String(updates.age) : '',
         genero: updates.gender || '',
-        peso: updates.weight !== null ? String(updates.weight) : '',
+        peso: (editDraft.weight || '').trim() || profileData?.peso || '',
+        medicalConditions: updates.medical_conditions || '',
         bloodType: updates.blood_type || '',
         allergies: updates.allergies || '',
-        medicalConditions: updates.medical_conditions || '',
         emergencyContact: updates.emergency_contact || '',
         completedAt: new Date().toISOString(),
       };
@@ -396,9 +398,13 @@ export default function InformacionPerfil({ onBack }) {
         fechaNacimiento: nextProfileData.fechaNacimiento ? nextProfileData.fechaNacimiento.toISOString() : null,
       }));
 
-      if (updates.name) setDisplayName(updates.name);
+      // Sincronizar nombre con el panel principal
+      if (cleanName) {
+        setDisplayName(cleanName);
+        await AsyncStorage.setItem('userName', cleanName);
+      }
       setEditMode(false);
-      Alert.alert('Éxito', 'Perfil actualizado correctamente.');
+      setShowSuccessModal(true);
     } catch (e) {
       console.error('Error guardando perfil:', e);
       Alert.alert('Error', 'No se pudo guardar el perfil. Intenta nuevamente.');
@@ -638,18 +644,6 @@ export default function InformacionPerfil({ onBack }) {
                     </View>
                   )}
 
-                  {profileData.allergies && (
-                    <View style={styles.infoItem}>
-                      <View style={iconContainerStyle}>
-                        <MaterialCommunityIcons name="alert-circle" size={20} color="#ff6b6b" />
-                      </View>
-                      <View style={styles.infoContent}>
-                        <Text style={infoLabelStyle}>Alergias</Text>
-                        <Text style={infoValueStyle}>{profileData.allergies}</Text>
-                      </View>
-                    </View>
-                  )}
-
                   {profileData.medicalConditions && (
                     <View style={styles.infoItem}>
                       <View style={iconContainerStyle}>
@@ -658,18 +652,6 @@ export default function InformacionPerfil({ onBack }) {
                       <View style={styles.infoContent}>
                         <Text style={infoLabelStyle}>Condiciones Médicas</Text>
                         <Text style={infoValueStyle}>{profileData.medicalConditions}</Text>
-                      </View>
-                    </View>
-                  )}
-
-                  {profileData.emergencyContact && (
-                    <View style={styles.infoItem}>
-                      <View style={iconContainerStyle}>
-                        <Ionicons name="call" size={20} color="#f093fb" />
-                      </View>
-                      <View style={styles.infoContent}>
-                        <Text style={infoLabelStyle}>Contacto de Emergencia</Text>
-                        <Text style={infoValueStyle}>{profileData.emergencyContact}</Text>
                       </View>
                     </View>
                   )}
@@ -704,32 +686,6 @@ export default function InformacionPerfil({ onBack }) {
               />
             </View>
 
-            {/* Botón Sonidos y Tonos */}
-            <TouchableOpacity
-              onPress={openSoundModal}
-              activeOpacity={0.8}
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(102, 126, 234, 0.05)',
-                borderRadius: 16,
-                padding: 16,
-                marginBottom: 20,
-                width: '100%',
-              }}
-            >
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <View style={[styles.infoIconContainer, { backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : '#fff' }]}>
-                  <Ionicons name="musical-notes" size={20} color="#667eea" />
-                </View>
-                <View>
-                  <Text style={{ fontSize: 15, fontWeight: '600', color: isDark ? '#EEE' : '#333' }}>Sonidos y Tonos</Text>
-                  <Text style={{ fontSize: 11, color: isDark ? '#888' : '#999', marginTop: 1 }}>Alarmas, notificaciones y vibración</Text>
-                </View>
-              </View>
-              <Ionicons name="chevron-forward" size={20} color={isDark ? '#666' : '#bbb'} />
-            </TouchableOpacity>
             <View style={styles.buttonContainer}>
               <TouchableOpacity
                 style={styles.editButton}
@@ -836,28 +792,9 @@ export default function InformacionPerfil({ onBack }) {
                                 onChangeText={(t) => setEditDraft((p) => ({ ...p, medicalConditions: t }))}
                                 placeholder="Ej. Hipertensión (Opcional)"
                                 placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                                style={{ borderWidth: 1, borderColor: isDark ? '#475569' : '#e1e4e8', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, marginBottom: 16, color: isDark ? '#fff' : '#333', fontSize: 16, backgroundColor: isDark ? '#334155' : '#f9f9f9' }}
-                            />
-
-                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#667eea', marginBottom: 8 }}>Alergias</Text>
-                            <TextInput
-                                value={editDraft.allergies}
-                                onChangeText={(t) => setEditDraft((p) => ({ ...p, allergies: t }))}
-                                placeholder="Ej. Penicilina (Opcional)"
-                                placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                                style={{ borderWidth: 1, borderColor: isDark ? '#475569' : '#e1e4e8', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, marginBottom: 16, color: isDark ? '#fff' : '#333', fontSize: 16, backgroundColor: isDark ? '#334155' : '#f9f9f9' }}
-                            />
-
-                            <Text style={{ fontSize: 13, fontWeight: '700', color: '#667eea', marginBottom: 8 }}>Contacto de Emergencia</Text>
-                            <TextInput
-                                value={editDraft.emergencyContact}
-                                onChangeText={(t) => setEditDraft((p) => ({ ...p, emergencyContact: t }))}
-                                placeholder="Número o nombre"
-                                placeholderTextColor={isDark ? "#94a3b8" : "#999"}
-                                keyboardType="phone-pad"
                                 style={{ borderWidth: 1, borderColor: isDark ? '#475569' : '#e1e4e8', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, marginBottom: 24, color: isDark ? '#fff' : '#333', fontSize: 16, backgroundColor: isDark ? '#334155' : '#f9f9f9' }}
                             />
-                            
+
                             <View style={{ flexDirection: 'row', gap: 12, marginBottom: 10 }}>
                                 <TouchableOpacity
                                     style={{ flex: 1, backgroundColor: '#f5576c', paddingVertical: 16, borderRadius: 16, alignItems: 'center' }}
@@ -884,6 +821,57 @@ export default function InformacionPerfil({ onBack }) {
                     </Animatable.View>
                 </KeyboardAvoidingView>
             </View>
+        </Modal>
+
+        {/* Modal de éxito al guardar perfil */}
+        <Modal
+          visible={showSuccessModal}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setShowSuccessModal(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <Animatable.View
+              animation="zoomIn"
+              duration={350}
+              style={[styles.modalContent, isDark && { backgroundColor: theme.card }]}
+            >
+              <View style={styles.modalIconContainer}>
+                <LinearGradient
+                  colors={['#667eea', '#764ba2']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={[styles.modalIconCircle, { width: 68, height: 68, borderRadius: 34 }]}
+                >
+                  <Ionicons name="checkmark-circle" size={36} color="#fff" />
+                </LinearGradient>
+              </View>
+
+              <Text style={[styles.modalTitle, isDark && { color: theme.text }]}>
+                Cambios realizados con éxito
+              </Text>
+              <Text style={[styles.modalMessage, isDark && { color: theme.textSecondary }]}>
+                Perfil actualizado correctamente.
+              </Text>
+
+              <View style={{ width: '100%', marginTop: 8 }}>
+                <TouchableOpacity
+                  onPress={() => setShowSuccessModal(false)}
+                  activeOpacity={0.85}
+                >
+                  <LinearGradient
+                    colors={['#667eea', '#764ba2']}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={styles.modalConfirmGradient}
+                  >
+                    <Ionicons name="checkmark" size={18} color="#fff" />
+                    <Text style={styles.modalConfirmText}>Aceptar</Text>
+                  </LinearGradient>
+                </TouchableOpacity>
+              </View>
+            </Animatable.View>
+          </View>
         </Modal>
 
         {/* Modal de confirmación de logout */}
@@ -976,7 +964,7 @@ export default function InformacionPerfil({ onBack }) {
                     </View>
                     <View>
                       <Text style={{ color: '#fff', fontWeight: '800', fontSize: 18 }}>Sonidos y Tonos</Text>
-                      <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>Alarmas, notificaciones y vibración</Text>
+                      <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>Notificaciones y vibración</Text>
                     </View>
                   </View>
                   <TouchableOpacity onPress={() => setSoundModalVisible(false)}>
@@ -1011,37 +999,6 @@ export default function InformacionPerfil({ onBack }) {
                     <View style={{ flex: 1 }}>
                       <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>
                         {getSelectedToneLabel('notif')}
-                      </Text>
-                      <Text style={{ fontSize: 11, color: isDark ? '#64748b' : '#94a3b8', marginTop: 2 }}>Toca para cambiar</Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={18} color={isDark ? '#475569' : '#94a3b8'} />
-                  </TouchableOpacity>
-                </View>
-
-                {/* ── SECCIÓN: Tono de alarma ── */}
-                <View style={{ marginBottom: 20 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#f093fb', marginRight: 8 }} />
-                    <Text style={{ fontSize: 13, fontWeight: '800', color: isDark ? '#94a3b8' : '#64748b', letterSpacing: 0.8, textTransform: 'uppercase' }}>
-                      Alarma · Pantalla de bloqueo
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    onPress={() => openTonePicker('alarm')}
-                    activeOpacity={0.7}
-                    style={{
-                      flexDirection: 'row', alignItems: 'center',
-                      backgroundColor: isDark ? '#1e293b' : '#fff',
-                      borderRadius: 16, padding: 16,
-                      borderWidth: 1, borderColor: isDark ? '#1e293b' : '#e2e8f0',
-                    }}
-                  >
-                    <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: isDark ? '#334155' : '#fdf4ff', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
-                      <Ionicons name="alarm" size={20} color="#f093fb" />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>
-                        {getSelectedToneLabel('alarm')}
                       </Text>
                       <Text style={{ fontSize: 11, color: isDark ? '#64748b' : '#94a3b8', marginTop: 2 }}>Toca para cambiar</Text>
                     </View>
@@ -1092,49 +1049,14 @@ export default function InformacionPerfil({ onBack }) {
                       </View>
                     )}
                   </View>
-
-                  {/* Volumen alarma */}
-                  <View style={{ backgroundColor: isDark ? '#1e293b' : '#fff', borderRadius: 16, padding: 16 }}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                        <Ionicons name="alarm" size={16} color="#f093fb" style={{ marginRight: 8 }} />
-                        <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>Alarmas</Text>
-                      </View>
-                      <Text style={{ fontSize: 13, fontWeight: '800', color: '#f093fb' }}>{Math.round(alarmVolume * 100)}%</Text>
-                    </View>
-                    <Slider
-                      style={{ width: '100%', height: 36 }}
-                      minimumValue={0}
-                      maximumValue={1}
-                      value={alarmVolume}
-                      onValueChange={setAlarmVolume}
-                      minimumTrackTintColor="#f093fb"
-                      maximumTrackTintColor={isDark ? '#334155' : '#e2e8f0'}
-                      thumbTintColor="#f093fb"
-                    />
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                      <Text style={{ fontSize: 10, color: isDark ? '#475569' : '#94a3b8' }}>0%</Text>
-                      <View style={{ alignItems: 'center' }}>
-                        <View style={{ width: 1, height: 6, backgroundColor: '#f093fb', opacity: 0.5 }} />
-                        <Text style={{ fontSize: 10, color: '#f093fb', fontWeight: '700' }}>Recomendado: 100%</Text>
-                      </View>
-                      <Text style={{ fontSize: 10, color: isDark ? '#475569' : '#94a3b8' }}>100%</Text>
-                    </View>
-                    {alarmVolume < 0.8 && (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, backgroundColor: 'rgba(239,68,68,0.1)', borderRadius: 8, padding: 8 }}>
-                        <Ionicons name="warning" size={14} color="#ef4444" style={{ marginRight: 6 }} />
-                        <Text style={{ fontSize: 11, color: '#ef4444', fontWeight: '600' }}>Las alarmas deben estar al máximo para despertarte</Text>
-                      </View>
-                    )}
-                  </View>
                 </View>
 
-                {/* ── SECCIÓN: Vibración ── */}
+                {/* ── SECCIÓN: Vibración en notificaciones ── */}
                 <View style={{ marginBottom: 24 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
                     <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#4ade80', marginRight: 8 }} />
                     <Text style={{ fontSize: 13, fontWeight: '800', color: isDark ? '#94a3b8' : '#64748b', letterSpacing: 0.8, textTransform: 'uppercase' }}>
-                      Vibración
+                      Vibración en notificaciones
                     </Text>
                   </View>
                   <View style={{
@@ -1147,7 +1069,7 @@ export default function InformacionPerfil({ onBack }) {
                         <Ionicons name="phone-portrait" size={20} color="#4ade80" />
                       </View>
                       <View>
-                        <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>Vibración en alarmas</Text>
+                        <Text style={{ fontWeight: '700', fontSize: 14, color: isDark ? '#f1f5f9' : '#1e293b' }}>Vibración en notificaciones</Text>
                         <Text style={{ fontSize: 11, color: isDark ? '#64748b' : '#94a3b8', marginTop: 1 }}>
                           {vibrationEnabled ? 'Activada' : 'Desactivada'}
                         </Text>

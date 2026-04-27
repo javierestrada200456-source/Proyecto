@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   ScrollView,
   Dimensions,
-  RefreshControl,
   Image,
   Alert,
   Modal,
@@ -18,7 +17,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Animatable from 'react-native-animatable';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import ReminderCard from './ReminderCard';
 import styles from './PanelPrincipal.Styles';
 import { authService, supabase } from '../../services/supabaseClient';
@@ -33,7 +32,7 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
   const router = useRouter();
   const { theme, isDark } = useTheme();
   const insets = useSafeAreaInsets();
-  const [refreshing, setRefreshing] = useState(false);
+  const [localUserName, setLocalUserName] = useState(userName);
   const [profileImage, setProfileImage] = useState(null);
   const [welcomeMessage, setWelcomeMessage] = useState('¡Bienvenido de vuelta!');
   const [stats, setStats] = useState({ 
@@ -305,19 +304,27 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
     }
   };
 
-  const onRefresh = async () => {
-    setRefreshing(true);
-    await loadStats();
-    setTimeout(() => setRefreshing(false), 800);
-  };
-
-  useEffect(() => {
-    loadStats();
-    // Escuchar cambios de foco para recargar stats (cuando vuelve de otra pantalla)
-    // En Expo Router/React Navigation, esto se haría idealmente con useFocusEffect
-    // pero como no lo tenemos importado, lo simulamos refrescando al cambiar user
-    if (userName) loadStats();
-  }, [userName]);
+  useFocusEffect(
+    useCallback(() => {
+      loadStats();
+      // Recargar nombre al volver desde el perfil
+      const refreshName = async () => {
+        try {
+          const { data } = await authService.getProfile();
+          if (data?.name) {
+            setLocalUserName(data.name);
+            return;
+          }
+          const stored = await AsyncStorage.getItem('userName');
+          if (stored) setLocalUserName(stored);
+        } catch (_) {
+          const stored = await AsyncStorage.getItem('userName');
+          if (stored) setLocalUserName(stored);
+        }
+      };
+      refreshName();
+    }, [])
+  );
 
   const menuItems = [
     {
@@ -331,7 +338,7 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
     },
     {
       id: 2,
-      title: 'Conectar Recordatorios',
+      title: 'Conecta tus recordatorios',
       icon: 'link',
       color: '#8B5CF6',
       bgColor: isDark ? '#2e1b4e' : '#f0ebff',
@@ -499,13 +506,7 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
             { paddingBottom: 24 + insets.bottom }
           ]}
           showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor="#fff"
-            />
-          }
+          scrollEnabled={false}
         >
           {/* Header */}
           <Animatable.View
@@ -516,7 +517,7 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
             <View style={styles.headerContent}>
               <View style={{ flex: 1, marginRight: 12 }}>
                 <Text style={styles.greeting}>{welcomeMessage}</Text>
-                <Text style={styles.userName}>{userName}</Text>
+                <Text style={styles.userName}>{localUserName}</Text>
               </View>
               <View style={styles.profileSection}>
                 <TouchableOpacity
@@ -628,13 +629,23 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
 
               <View style={styles.verticalDivider} />
 
-              {/* Stat 3: Recordatorios completados */}
-              <TouchableOpacity style={styles.statItem} onPress={() => setHistoryModalVisible(true)} activeOpacity={0.7}>
-                <View style={[styles.statIconCircle, { backgroundColor: '#f093fb' }]}>
-                  <Ionicons name="checkmark-circle" size={22} color="#fff" />
+              {/* Stat 3: Historial de dosis */}
+              <TouchableOpacity
+                style={styles.statItem}
+                onPress={async () => {
+                  try {
+                    const stored = await AsyncStorage.getItem(DOSE_HISTORY_KEY);
+                    setHistoryEntries(stored ? JSON.parse(stored) : []);
+                  } catch (_e) {}
+                  setHistoryModalVisible(true);
+                }}
+                activeOpacity={0.7}
+              >
+                <View style={[styles.statIconCircle, { backgroundColor: '#4facfe' }]}>
+                  <Ionicons name="time" size={22} color="#fff" />
                 </View>
-                <Text style={[styles.statNumber, { color: '#f093fb' }]}>{stats.completed}</Text>
-                <Text style={[styles.statLabel, isDark && { color: theme.textSecondary }]}>Recordatorios Completados</Text>
+                <Text style={[styles.statNumber, { color: '#4facfe' }]}>{stats.completed}</Text>
+                <Text style={[styles.statLabel, isDark && { color: theme.textSecondary }]}>Historial de Dosis</Text>
               </TouchableOpacity>
             </LinearGradient>
           </Animatable.View>
@@ -793,49 +804,106 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
                       Aún no has aceptado ninguna dosis.
                     </Text>
                   ) : historyDetailMed ? (
-                    /* Vista detalle: entradas de UN medicamento, más recientes arriba */
+                    /* Vista detalle: estilo chat (WhatsApp-like) */
                     (() => {
                       const pad = (n) => String(n).padStart(2, '0');
-                      const fmtDate = (d) => `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
-                      const fmtTime = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+                      const fmt12 = (d) => {
+                        const h = d.getHours(), m = pad(d.getMinutes());
+                        const ampm = h >= 12 ? 'PM' : 'AM';
+                        return `${h % 12 || 12}:${m} ${ampm}`;
+                      };
+                      const today = new Date();
+                      const yesterday = new Date(today);
+                      yesterday.setDate(today.getDate() - 1);
+                      const getDateLabel = (ts) => {
+                        const d = new Date(ts);
+                        if (d.toDateString() === today.toDateString()) return 'Hoy';
+                        if (d.toDateString() === yesterday.toDateString()) return 'Ayer';
+                        return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+                      };
+
                       const entries = historyEntries
                         .filter(e => e.medName === historyDetailMed)
-                        .sort((a, b) => new Date(b.takenAt) - new Date(a.takenAt));
-                      return entries.map((entry) => {
-                        const takenDate = new Date(entry.takenAt);
-                        const scheduledDate = entry.scheduledTime ? new Date(entry.scheduledTime) : null;
-                        return (
-                          <View
-                            key={entry.id}
-                            style={{
-                              padding: 14,
-                              marginBottom: 10,
-                              borderRadius: 14,
-                              backgroundColor: isDark ? 'rgba(240,147,251,0.1)' : '#fdf4ff',
-                              borderLeftWidth: 4,
-                              borderLeftColor: '#f093fb',
-                            }}
-                          >
-                            <Text style={{ fontSize: 14, color: '#f093fb', fontWeight: '700', marginBottom: 4 }}>
-                              {entry.doseLabel}
-                            </Text>
-                            {scheduledDate && (
-                              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 3 }}>
-                                <Ionicons name="alarm-outline" size={14} color={isDark ? '#aaa' : '#888'} />
-                                <Text style={{ fontSize: 12, color: isDark ? '#aaa' : '#666', marginLeft: 5 }}>
-                                  Programada: {fmtDate(scheduledDate)} {fmtTime(scheduledDate)}
-                                </Text>
-                              </View>
-                            )}
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                              <Ionicons name="checkmark-circle-outline" size={14} color="#4ade80" />
-                              <Text style={{ fontSize: 12, color: '#4ade80', marginLeft: 5, fontWeight: '600' }}>
-                                Tomado el {fmtDate(takenDate)} a las {fmtTime(takenDate)}
-                              </Text>
-                            </View>
-                          </View>
-                        );
+                        .sort((a, b) => new Date(a.takenAt) - new Date(b.takenAt)); // cronológico (como chat)
+
+                      // Construir lista con separadores de fecha
+                      const items = [];
+                      let lastLabel = '';
+                      entries.forEach(entry => {
+                        const label = getDateLabel(entry.takenAt);
+                        if (label !== lastLabel) {
+                          items.push({ type: 'sep', label });
+                          lastLabel = label;
+                        }
+                        items.push({ type: 'msg', entry });
                       });
+
+                      if (items.length === 0) {
+                        return (
+                          <Text style={{ textAlign: 'center', color: isDark ? '#64748b' : '#aaa', marginTop: 30, fontSize: 14 }}>
+                            Sin registros para este medicamento.
+                          </Text>
+                        );
+                      }
+
+                      return (
+                        <View style={{ paddingBottom: 10 }}>
+                          {items.map((item, i) => {
+                            if (item.type === 'sep') {
+                              return (
+                                <View key={`s-${i}`} style={{ alignItems: 'center', marginVertical: 12 }}>
+                                  <View style={{
+                                    backgroundColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.07)',
+                                    borderRadius: 12, paddingHorizontal: 14, paddingVertical: 4,
+                                  }}>
+                                    <Text style={{ fontSize: 11, fontWeight: '700', color: isDark ? '#94a3b8' : '#64748b' }}>
+                                      {item.label}
+                                    </Text>
+                                  </View>
+                                </View>
+                              );
+                            }
+                            const { entry } = item;
+                            const takenDate = new Date(entry.takenAt);
+                            const scheduledDate = entry.scheduledTime ? new Date(entry.scheduledTime) : null;
+                            return (
+                              <View key={entry.id} style={{ alignItems: 'center', marginBottom: 10 }}>
+                                <View style={{
+                                  backgroundColor: '#16a34a',
+                                  borderRadius: 18,
+                                  paddingHorizontal: 18,
+                                  paddingVertical: 12,
+                                  shadowColor: '#000',
+                                  shadowOffset: { width: 0, height: 2 },
+                                  shadowOpacity: 0.15,
+                                  shadowRadius: 4,
+                                  elevation: 3,
+                                  width: '85%',
+                                  alignItems: 'center',
+                                }}>
+                                  <Text style={{ fontSize: 15, fontWeight: '800', color: '#fff', marginBottom: scheduledDate ? 6 : 4 }}>
+                                    {entry.doseLabel}
+                                  </Text>
+                                  {scheduledDate && (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 5 }}>
+                                      <Ionicons name="alarm-outline" size={12} color="rgba(255,255,255,0.7)" style={{ marginRight: 4 }} />
+                                      <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.8)', textAlign: 'center' }}>
+                                        Programada: {fmt12(scheduledDate)}
+                                      </Text>
+                                    </View>
+                                  )}
+                                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, marginTop: 2 }}>
+                                    <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.85)' }}>
+                                      {fmt12(takenDate)}
+                                    </Text>
+                                    <Ionicons name="checkmark-done" size={14} color="rgba(255,255,255,0.9)" />
+                                  </View>
+                                </View>
+                              </View>
+                            );
+                          })}
+                        </View>
+                      );
                     })()
                   ) : (
                     /* Vista lista: un card por medicamento */
@@ -864,15 +932,12 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
                               padding: 14,
                               marginBottom: 12,
                               borderRadius: 16,
-                              backgroundColor: isDark ? 'rgba(240,147,251,0.08)' : '#fdf4ff',
+                              backgroundColor: isDark ? 'rgba(79,172,254,0.08)' : '#f0f8ff',
                               borderWidth: 1,
-                              borderColor: isDark ? 'rgba(240,147,251,0.25)' : '#f0c4fa',
+                              borderColor: isDark ? 'rgba(79,172,254,0.25)' : '#bde0fe',
                             }}
                           >
                             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-                              <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: '#f093fb', alignItems: 'center', justifyContent: 'center', marginRight: 10 }}>
-                                <Ionicons name="medical" size={18} color="#fff" />
-                              </View>
                               <View style={{ flex: 1 }}>
                                 <Text style={{ fontSize: 16, fontWeight: '800', color: isDark ? '#fff' : '#333' }}>{medName}</Text>
                                 <Text style={{ fontSize: 11, color: isDark ? '#aaa' : '#888', marginTop: 1 }}>
@@ -889,17 +954,17 @@ export default function PanelPrincipal({ userName = 'Usuario', onLogout }) {
                             <TouchableOpacity
                               onPress={() => setHistoryDetailMed(medName)}
                               style={{
-                                backgroundColor: '#f093fb',
+                                backgroundColor: '#4facfe',
                                 borderRadius: 10,
-                                paddingVertical: 8,
+                                paddingVertical: 10,
                                 alignItems: 'center',
                                 flexDirection: 'row',
                                 justifyContent: 'center',
                                 gap: 6,
                               }}
                             >
-                              <Ionicons name="list" size={16} color="#fff" />
-                              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Ver historial de este medicamento</Text>
+                              <Ionicons name="time-outline" size={17} color="#fff" />
+                              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 14 }}>Ver historial de este medicamento</Text>
                             </TouchableOpacity>
                           </View>
                         );
